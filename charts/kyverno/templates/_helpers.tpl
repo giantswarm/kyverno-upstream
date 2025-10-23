@@ -1,8 +1,15 @@
 {{/* vim: set filetype=mustache: */}}
 
+{{/* Validate OpenReports configuration */}}
+{{- define "kyverno.validateOpenReports" -}}
+{{- if and (not .Values.openreports.enabled) .Values.openreports.installCrds -}}
+{{- fail "OpenReports CRD installation (openreports.installCrds) cannot be enabled when the feature (openreports.enabled) is disabled" -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "kyverno.chartVersion" -}}
-{{- if .Values.templating.enabled -}}
-  {{- required "templating.version is required when templating.enabled is true" .Values.templating.version | replace "+" "_" -}}
+{{- if .Values.global.templating.enabled -}}
+  {{- required "templating.version is required when templating.enabled is true" .Values.global.templating.version | replace "+" "_" -}}
 {{- else -}}
   {{- .Chart.Version | replace "+" "_" -}}
 {{- end -}}
@@ -25,6 +32,9 @@
 {{- with .validatingAdmissionPolicyReports -}}
   {{- $flags = append $flags (print "--validatingAdmissionPolicyReports=" .enabled) -}}
 {{- end -}}
+{{- with .mutatingAdmissionPolicyReports -}}
+  {{- $flags = append $flags (print "--mutatingAdmissionPolicyReports=" .enabled) -}}
+{{- end -}}
 {{- with .autoUpdateWebhooks -}}
   {{- $flags = append $flags (print "--autoUpdateWebhooks=" .enabled) -}}
 {{- end -}}
@@ -36,6 +46,9 @@
 {{- end -}}
 {{- with .configMapCaching -}}
   {{- $flags = append $flags (print "--enableConfigMapCaching=" .enabled) -}}
+{{- end -}}
+{{- with .controllerRuntimeMetrics -}}
+  {{- $flags = append $flags (print "--controllerRuntimeMetricsAddress=" .bindAddress) -}}
 {{- end -}}
 {{- with .deferredLoading -}}
   {{- $flags = append $flags (print "--enableDeferredLoading=" .enabled) -}}
@@ -49,6 +62,9 @@
 {{- with .generateValidatingAdmissionPolicy -}}
   {{- $flags = append $flags (print "--generateValidatingAdmissionPolicy=" .enabled) -}}
 {{- end -}}
+{{- with .generateMutatingAdmissionPolicy -}}
+  {{- $flags = append $flags (print "--generateMutatingAdmissionPolicy=" .enabled) -}}
+{{- end -}}
 {{- with .dumpPatches -}}
   {{- $flags = append $flags (print "--dumpPatches=" .enabled) -}}
 {{- end -}}
@@ -57,7 +73,7 @@
 {{- end -}}
 {{- with .logging -}}
   {{- $flags = append $flags (print "--loggingFormat=" .format) -}}
-  {{- $flags = append $flags (print "--v=" (join "," .verbosity)) -}}
+  {{- $flags = append $flags (print "--v=" .verbosity) -}}
 {{- end -}}
 {{- with .omitEvents -}}
   {{- with .eventTypes -}}
@@ -115,5 +131,24 @@
 {{- end -}}
 {{- with $flags -}}
   {{- toYaml . -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Helper function to sort imagePullSecrets by name to ensure consistent ordering */}}
+{{- define "kyverno.sortedImagePullSecrets" -}}
+{{- if . -}}
+{{- $secrets := list -}}
+{{- range . -}}
+{{- $secrets = append $secrets .name -}}
+{{- end -}}
+{{- $sortedSecrets := list -}}
+{{- if $secrets -}}
+{{- $sortedSecrets = sortAlpha $secrets -}}
+{{- end -}}
+{{- $sortedRefs := list -}}
+{{- range $sortedSecrets -}}
+{{- $sortedRefs = append $sortedRefs (dict "name" .) -}}
+{{- end -}}
+{{- toYaml $sortedRefs -}}
 {{- end -}}
 {{- end -}}

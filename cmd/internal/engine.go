@@ -29,7 +29,6 @@ func NewEngine(
 	ctx context.Context,
 	logger logr.Logger,
 	configuration config.Configuration,
-	metricsConfiguration config.MetricsConfiguration,
 	jp jmespath.Interface,
 	client dclient.Interface,
 	rclient registryclient.Client,
@@ -43,10 +42,9 @@ func NewEngine(
 ) engineapi.Engine {
 	configMapResolver := NewConfigMapResolver(ctx, logger, kubeClient, resyncPeriod)
 	logger = logger.WithName("engine")
-	logger.Info("setup engine...")
+	logger.V(2).Info("setup engine...")
 	return engine.NewEngine(
 		configuration,
-		metricsConfiguration,
 		jp,
 		adapters.Client(client),
 		factories.DefaultRegistryClientFactory(adapters.RegistryClient(rclient), secretLister),
@@ -62,7 +60,7 @@ func NewExceptionSelector(
 	kyvernoInformer kyvernoinformer.SharedInformerFactory,
 ) (engineapi.PolicyExceptionSelector, Controller) {
 	logger = logger.WithName("exception-selector").WithValues("enablePolicyException", enablePolicyException, "exceptionNamespace", exceptionNamespace)
-	logger.Info("setup exception selector...")
+	logger.V(2).Info("setup exception selector...")
 	if !enablePolicyException {
 		return nil, nil
 	}
@@ -91,7 +89,7 @@ func NewConfigMapResolver(
 	resyncPeriod time.Duration,
 ) engineapi.ConfigmapResolver {
 	logger = logger.WithName("configmap-resolver").WithValues("enableConfigMapCaching", enableConfigMapCaching)
-	logger.Info("setup config map resolver...")
+	logger.V(2).Info("setup config map resolver...")
 	clientBasedResolver, err := resolvers.NewClientBasedResolver(kubeClient)
 	checkError(logger, err, "failed to create client based resolver")
 	if !enableConfigMapCaching {

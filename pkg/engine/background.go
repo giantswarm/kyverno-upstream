@@ -66,8 +66,9 @@ func (e *engine) filterRule(
 		return nil
 	}
 	// check if there are policy exceptions that match the incoming resource
-	matchedExceptions := engineutils.MatchesException(exceptions, policyContext, logger)
+	matchedExceptions := engineutils.MatchesException(e.client, exceptions, policyContext, true, logger)
 	if len(matchedExceptions) > 0 {
+		exceptions := make([]engineapi.GenericException, 0, len(matchedExceptions))
 		var keys []string
 		for i, exception := range matchedExceptions {
 			key, err := cache.MetaNamespaceKeyFunc(&matchedExceptions[i])
@@ -76,10 +77,11 @@ func (e *engine) filterRule(
 				return engineapi.RuleError(rule.Name, ruleType, "failed to compute exception key", err, rule.ReportProperties)
 			}
 			keys = append(keys, key)
+			exceptions = append(exceptions, engineapi.NewPolicyException(&exception))
 		}
 
 		logger.V(3).Info("policy rule is skipped due to policy exceptions", "exceptions", keys)
-		return engineapi.RuleSkip(rule.Name, ruleType, "rule is skipped due to policy exception "+strings.Join(keys, ", "), rule.ReportProperties).WithExceptions(matchedExceptions)
+		return engineapi.RuleSkip(rule.Name, ruleType, "rule is skipped due to policy exception "+strings.Join(keys, ", "), rule.ReportProperties).WithExceptions(exceptions)
 	}
 
 	newResource := policyContext.NewResource()

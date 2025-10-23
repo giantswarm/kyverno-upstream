@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/kyverno/kyverno/api/kyverno"
@@ -13,10 +12,15 @@ import (
 	resourcehandlers "github.com/kyverno/kyverno/cmd/cleanup-controller/handlers/admission/resource"
 	"github.com/kyverno/kyverno/cmd/internal"
 	"github.com/kyverno/kyverno/pkg/auth/checker"
+	"github.com/kyverno/kyverno/pkg/cel/libs"
+	"github.com/kyverno/kyverno/pkg/cel/matching"
+	"github.com/kyverno/kyverno/pkg/cel/policies/dpol/compiler"
+	"github.com/kyverno/kyverno/pkg/cel/policies/dpol/engine"
 	kyvernoinformer "github.com/kyverno/kyverno/pkg/client/informers/externalversions"
 	"github.com/kyverno/kyverno/pkg/config"
 	"github.com/kyverno/kyverno/pkg/controllers/certmanager"
 	"github.com/kyverno/kyverno/pkg/controllers/cleanup"
+	"github.com/kyverno/kyverno/pkg/controllers/deleting"
 	genericloggingcontroller "github.com/kyverno/kyverno/pkg/controllers/generic/logging"
 	genericwebhookcontroller "github.com/kyverno/kyverno/pkg/controllers/generic/webhook"
 	globalcontextcontroller "github.com/kyverno/kyverno/pkg/controllers/globalcontext"
@@ -30,12 +34,14 @@ import (
 	"github.com/kyverno/kyverno/pkg/tls"
 	"github.com/kyverno/kyverno/pkg/toggle"
 	kubeutils "github.com/kyverno/kyverno/pkg/utils/kube"
+	"github.com/kyverno/kyverno/pkg/utils/restmapper"
 	runtimeutils "github.com/kyverno/kyverno/pkg/utils/runtime"
 	"github.com/kyverno/kyverno/pkg/webhooks"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiserver "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	kubeinformers "k8s.io/client-go/informers"
 )
 
@@ -87,7 +93,8 @@ func main() {
 	flagset.BoolVar(&dumpPayload, "dumpPayload", false, "Set this flag to activate/deactivate debug mode.")
 	flagset.StringVar(&serverIP, "serverIP", "", "IP address where Kyverno controller runs. Only required if out-of-cluster.")
 	flagset.IntVar(&servicePort, "servicePort", 443, "Port used by the Kyverno Service resource and for webhook configurations.")
-	flagset.IntVar(&webhookServerPort, "webhookServerPort", 9443, "Port used by the webhook server.")
+	// Deprecated: orphaned flag, use --cleanupServerPort from cmd/internal/flags.go instead
+	flagset.IntVar(&webhookServerPort, "webhookServerPort", 9443, "Port used by the webhook server. (deprecated: replaced by --cleanupServerPort)")
 	flagset.IntVar(&maxQueuedEvents, "maxQueuedEvents", 1000, "Maximum events to be queued.")
 	flagset.DurationVar(&interval, "ttlReconciliationInterval", time.Minute, "Set this flag to set the interval after which the resource controller reconciliation should occur")
 	flagset.Func(toggle.ProtectManagedResourcesFlagName, toggle.ProtectManagedResourcesDescription, toggle.ProtectManagedResources.Parse)
@@ -111,14 +118,18 @@ func main() {
 		internal.WithMetadataClient(),
 		internal.WithApiServerClient(),
 		internal.WithFlagSets(flagset),
+		internal.WithRestConfig(),
 	)
 	// parse flags
 	internal.ParseFlags(appConfig)
-	var wg sync.WaitGroup
+	var wg wait.Group
 	func() {
 		// setup
 		ctx, setup, sdown := internal.Setup(appConfig, "kyverno-cleanup-controller", false)
 		defer sdown()
+		if webhookServerPort != 9443 {
+			setup.Logger.Info("--webhookServerPort is deprecated, use '--cleanupServerPort' instead")
+		}
 		if caSecretName == "" {
 			setup.Logger.Error(errors.New("exiting... caSecretName is a required flag"), "exiting... caSecretName is a required flag")
 			os.Exit(1)
@@ -131,6 +142,7 @@ func main() {
 			setup.Logger.Error(err, "sanity checks failed")
 			os.Exit(1)
 		}
+
 		// certificates informers
 		caSecret := informers.NewSecretInformer(setup.KubeClient, config.KyvernoNamespace(), caSecretName, setup.ResyncPeriod)
 		tlsSecret := informers.NewSecretInformer(setup.KubeClient, config.KyvernoNamespace(), tlsSecretName, setup.ResyncPeriod)
@@ -162,6 +174,7 @@ func main() {
 			setup.EventsClient,
 			logging.WithName("EventGenerator"),
 			maxQueuedEvents,
+			setup.Configuration,
 		)
 		eventController := internal.NewController(
 			event.ControllerName,
@@ -173,12 +186,14 @@ func main() {
 			globalcontextcontroller.ControllerName,
 			globalcontextcontroller.NewController(
 				kyvernoInformer.Kyverno().V2alpha1().GlobalContextEntries(),
+				setup.KubeClient,
 				setup.KyvernoDynamicClient,
 				setup.KyvernoClient,
 				gcstore,
 				eventGenerator,
 				maxAPICallResponseLength,
 				false,
+				setup.Jp,
 			),
 			globalcontextcontroller.Workers,
 		)
@@ -192,6 +207,19 @@ func main() {
 			kyvernoDeployment,
 			nil,
 		)
+
+		restMapper, err := restmapper.GetRESTMapper(setup.KyvernoDynamicClient, false)
+		if err != nil {
+			setup.Logger.Error(err, "failed to create RESTMapper")
+			os.Exit(1)
+		}
+
+		libCtx, err := libs.NewContextProvider(setup.KyvernoDynamicClient, nil, gcstore, restMapper, false)
+		if err != nil {
+			setup.Logger.Error(err, "failed to create CEL context provider")
+			os.Exit(1)
+		}
+
 		// setup leader election
 		le, err := leaderelection.New(
 			setup.Logger.WithName("leader-election"),
@@ -207,6 +235,13 @@ func main() {
 				kyvernoInformer := kyvernoinformer.NewSharedInformerFactory(setup.KyvernoClient, setup.ResyncPeriod)
 
 				cmResolver := internal.NewConfigMapResolver(ctx, setup.Logger, setup.KubeClient, setup.ResyncPeriod)
+				provider := engine.NewFetchProvider(
+					compiler.NewCompiler(),
+					kyvernoInformer.Policies().V1beta1().DeletingPolicies().Lister(),
+					kyvernoInformer.Policies().V1beta1().NamespacedDeletingPolicies().Lister(),
+					kyvernoInformer.Policies().V1alpha1().PolicyExceptions().Lister(),
+					internal.PolicyExceptionEnabled(),
+				)
 
 				// controllers
 				renewer := tls.NewCertRenewer(
@@ -245,8 +280,7 @@ func main() {
 						config.CleanupValidatingWebhookConfigurationName,
 						config.CleanupValidatingWebhookServicePath,
 						serverIP,
-						int32(servicePort),       //nolint:gosec
-						int32(webhookServerPort), //nolint:gosec
+						int32(servicePort), //nolint:gosec
 						nil,
 						[]admissionregistrationv1.RuleWithOperations{
 							{
@@ -286,8 +320,7 @@ func main() {
 						config.TtlValidatingWebhookConfigurationName,
 						config.TtlValidatingWebhookServicePath,
 						serverIP,
-						int32(servicePort),       //nolint:gosec
-						int32(webhookServerPort), //nolint:gosec
+						int32(servicePort), //nolint:gosec
 						&metav1.LabelSelector{
 							MatchExpressions: []metav1.LabelSelectorRequirement{
 								{
@@ -336,6 +369,33 @@ func main() {
 					),
 					cleanup.Workers,
 				)
+				deletingController := internal.NewController(
+					deleting.ControllerName,
+					deleting.NewController(
+						setup.KyvernoDynamicClient,
+						setup.KyvernoClient,
+						kyvernoInformer.Policies().V1beta1().DeletingPolicies(),
+						kyvernoInformer.Policies().V1beta1().NamespacedDeletingPolicies(),
+						provider,
+						engine.NewEngine(
+							func(name string) *corev1.Namespace {
+								ns, err := nsLister.Get(name)
+								if err != nil {
+									return nil
+								}
+								return ns
+							},
+							restMapper,
+							libCtx,
+							matching.NewMatcher(),
+						),
+						nsLister,
+						setup.Configuration,
+						cmResolver,
+						eventGenerator,
+					),
+					deleting.Workers,
+				)
 				ttlManagerController := internal.NewController(
 					ttlcontroller.ControllerName,
 					ttlcontroller.NewManager(
@@ -353,11 +413,12 @@ func main() {
 					os.Exit(1)
 				}
 				// start leader controllers
-				var wg sync.WaitGroup
+				var wg wait.Group
 				certController.Run(ctx, logger, &wg)
 				policyValidatingWebhookController.Run(ctx, logger, &wg)
 				ttlWebhookController.Run(ctx, logger, &wg)
 				cleanupController.Run(ctx, logger, &wg)
+				deletingController.Run(ctx, logger, &wg)
 				ttlManagerController.Run(ctx, logger, &wg)
 				wg.Wait()
 			},

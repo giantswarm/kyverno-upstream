@@ -9,7 +9,7 @@ import (
 	"github.com/kyverno/kyverno/pkg/engine/variables"
 	datautils "github.com/kyverno/kyverno/pkg/utils/data"
 	kubeutils "github.com/kyverno/kyverno/pkg/utils/kube"
-	admissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 )
 
 // the kyvernoRule holds the temporary kyverno rule struct
@@ -22,16 +22,17 @@ import (
 // https://github.com/kyverno/kyverno/issues/568
 
 type kyvernoRule struct {
-	Name                   string                                         `json:"name"`
-	MatchResources         *kyvernov1.MatchResources                      `json:"match"`
-	ExcludeResources       *kyvernov1.MatchResources                      `json:"exclude,omitempty"`
-	CELPreconditions       *[]admissionregistrationv1beta1.MatchCondition `json:"celPreconditions,omitempty"`
-	Context                *[]kyvernov1.ContextEntry                      `json:"context,omitempty"`
-	AnyAllConditions       *kyvernov1.ConditionsWrapper                   `json:"preconditions,omitempty"`
-	Mutation               *kyvernov1.Mutation                            `json:"mutate,omitempty"`
-	Validation             *kyvernov1.Validation                          `json:"validate,omitempty"`
-	VerifyImages           []kyvernov1.ImageVerification                  `json:"verifyImages,omitempty"`
-	SkipBackgroundRequests *bool                                          `json:"skipBackgroundRequests,omitempty"`
+	Name                   string                                    `json:"name"`
+	MatchResources         *kyvernov1.MatchResources                 `json:"match"`
+	ExcludeResources       *kyvernov1.MatchResources                 `json:"exclude,omitempty"`
+	CELPreconditions       *[]admissionregistrationv1.MatchCondition `json:"celPreconditions,omitempty"`
+	Context                *[]kyvernov1.ContextEntry                 `json:"context,omitempty"`
+	AnyAllConditions       *kyvernov1.ConditionsWrapper              `json:"preconditions,omitempty"`
+	Mutation               *kyvernov1.Mutation                       `json:"mutate,omitempty"`
+	Validation             *kyvernov1.Validation                     `json:"validate,omitempty"`
+	VerifyImages           []kyvernov1.ImageVerification             `json:"verifyImages,omitempty"`
+	SkipBackgroundRequests *bool                                     `json:"skipBackgroundRequests,omitempty"`
+	ReportProperties       map[string]string                         `json:"reportProperties,omitempty"`
 }
 
 func createRule(rule *kyvernov1.Rule) *kyvernoRule {
@@ -42,6 +43,13 @@ func createRule(rule *kyvernov1.Rule) *kyvernoRule {
 		Name:                   rule.Name,
 		VerifyImages:           rule.VerifyImages,
 		SkipBackgroundRequests: rule.SkipBackgroundRequests,
+	}
+	if len(rule.ReportProperties) > 0 {
+		rp := make(map[string]string, len(rule.ReportProperties))
+		for k, v := range rule.ReportProperties {
+			rp[k] = v
+		}
+		jsonFriendlyStruct.ReportProperties = rp
 	}
 	if !datautils.DeepEqual(rule.MatchResources, kyvernov1.MatchResources{}) {
 		jsonFriendlyStruct.MatchResources = rule.MatchResources.DeepCopy()
@@ -229,7 +237,7 @@ func generateRule(name string, rule *kyvernov1.Rule, tplKey, shift string, kinds
 			return rule
 		}
 		if rule.HasValidateAssert() {
-			rule.Validation.Assert = createAutogenAssertion(*rule.Validation.Assert.DeepCopy(), tplKey)
+			rule.Validation.Assert = createAutogenAssertion(rule.Validation.Assert.DeepCopy(), tplKey)
 			return rule
 		}
 	}
