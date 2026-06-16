@@ -1,12 +1,14 @@
 package admissionpolicygenerator
 
 import (
+	"fmt"
+
+	policiesv1beta1 "github.com/kyverno/api/api/policies.kyverno.io/v1beta1"
 	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
 	kyvernov2 "github.com/kyverno/kyverno/api/kyverno/v2"
-	policiesv1alpha1 "github.com/kyverno/kyverno/api/policies.kyverno.io/v1alpha1"
-	policiesv1beta1 "github.com/kyverno/kyverno/api/policies.kyverno.io/v1beta1"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	admissionregistrationv1alpha1 "k8s.io/api/admissionregistration/v1alpha1"
+	admissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
 	"k8s.io/apimachinery/pkg/labels"
 )
 
@@ -29,7 +31,7 @@ func (c *controller) getValidatingPolicy(name string) (*policiesv1beta1.Validati
 }
 
 // getMutatingPolicy gets the Kyverno MutatingPolicy
-func (c *controller) getMutatingPolicy(name string) (*policiesv1alpha1.MutatingPolicy, error) {
+func (c *controller) getMutatingPolicy(name string) (*policiesv1beta1.MutatingPolicy, error) {
 	mpol, err := c.mpolLister.Get(name)
 	if err != nil {
 		return nil, err
@@ -39,6 +41,9 @@ func (c *controller) getMutatingPolicy(name string) (*policiesv1alpha1.MutatingP
 
 // getValidatingAdmissionPolicy gets the Kubernetes ValidatingAdmissionPolicy
 func (c *controller) getValidatingAdmissionPolicy(name string) (*admissionregistrationv1.ValidatingAdmissionPolicy, error) {
+	if c.vapLister == nil {
+		return nil, fmt.Errorf("ValidatingAdmissionPolicy lister is nil")
+	}
 	vap, err := c.vapLister.Get(name)
 	if err != nil {
 		return nil, err
@@ -48,6 +53,9 @@ func (c *controller) getValidatingAdmissionPolicy(name string) (*admissionregist
 
 // getValidatingAdmissionPolicyBinding gets the Kubernetes ValidatingAdmissionPolicyBinding
 func (c *controller) getValidatingAdmissionPolicyBinding(name string) (*admissionregistrationv1.ValidatingAdmissionPolicyBinding, error) {
+	if c.vapbindingLister == nil {
+		return nil, fmt.Errorf("ValidatingAdmissionPolicyBinding lister is nil")
+	}
 	vapbinding, err := c.vapbindingLister.Get(name)
 	if err != nil {
 		return nil, err
@@ -55,22 +63,36 @@ func (c *controller) getValidatingAdmissionPolicyBinding(name string) (*admissio
 	return vapbinding, nil
 }
 
-// getMutatingAdmissionPolicy gets the Kubernetes MutatingAdmissionPolicy
+// getMutatingAdmissionPolicy gets the Kubernetes MutatingAdmissionPolicy (v1alpha1)
 func (c *controller) getMutatingAdmissionPolicy(name string) (*admissionregistrationv1alpha1.MutatingAdmissionPolicy, error) {
-	mapol, err := c.mapLister.Get(name)
-	if err != nil {
-		return nil, err
+	if c.mapAlphaLister == nil {
+		return nil, fmt.Errorf("MutatingAdmissionPolicy v1alpha1 lister is nil")
 	}
-	return mapol, nil
+	return c.mapAlphaLister.Get(name)
 }
 
-// getMutatingAdmissionPolicyBinding gets the Kubernetes MutatingAdmissionPolicyBinding
+// getMutatingAdmissionPolicyBinding gets the Kubernetes MutatingAdmissionPolicyBinding (v1alpha1)
 func (c *controller) getMutatingAdmissionPolicyBinding(name string) (*admissionregistrationv1alpha1.MutatingAdmissionPolicyBinding, error) {
-	mapbinding, err := c.mapbindingLister.Get(name)
-	if err != nil {
-		return nil, err
+	if c.mapbindingAlphaLister == nil {
+		return nil, fmt.Errorf("MutatingAdmissionPolicyBinding v1alpha1 lister is nil")
 	}
-	return mapbinding, nil
+	return c.mapbindingAlphaLister.Get(name)
+}
+
+// getMutatingAdmissionPolicyBeta gets the Kubernetes MutatingAdmissionPolicy (v1beta1)
+func (c *controller) getMutatingAdmissionPolicyBeta(name string) (*admissionregistrationv1beta1.MutatingAdmissionPolicy, error) {
+	if c.mapBetaLister == nil {
+		return nil, fmt.Errorf("MutatingAdmissionPolicy v1beta1 lister is nil")
+	}
+	return c.mapBetaLister.Get(name)
+}
+
+// getMutatingAdmissionPolicyBindingBeta gets the Kubernetes MutatingAdmissionPolicyBinding (v1beta1)
+func (c *controller) getMutatingAdmissionPolicyBindingBeta(name string) (*admissionregistrationv1beta1.MutatingAdmissionPolicyBinding, error) {
+	if c.mapbindingBetaLister == nil {
+		return nil, fmt.Errorf("MutatingAdmissionPolicyBinding v1beta1 lister is nil")
+	}
+	return c.mapbindingBetaLister.Get(name)
 }
 
 // getExceptions get PolicyExceptions that match both the ClusterPolicy and the rule if exists.
@@ -89,8 +111,8 @@ func (c *controller) getExceptions(policyName, rule string) ([]kyvernov2.PolicyE
 }
 
 // getCELExceptions get PolicyExceptions that match the ValidatingPolicy.
-func (c *controller) getCELExceptions(policyName string) ([]policiesv1alpha1.PolicyException, error) {
-	var exceptions []policiesv1alpha1.PolicyException
+func (c *controller) getCELExceptions(policyName string) ([]policiesv1beta1.PolicyException, error) {
+	var exceptions []policiesv1beta1.PolicyException
 	polexs, err := c.celpolexLister.List(labels.Everything())
 	if err != nil {
 		return nil, err

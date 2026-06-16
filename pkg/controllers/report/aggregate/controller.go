@@ -2,7 +2,6 @@ package aggregate
 
 import (
 	"context"
-	"strings"
 	"sync"
 	"time"
 
@@ -14,10 +13,8 @@ import (
 	"github.com/kyverno/kyverno/pkg/autogen"
 	"github.com/kyverno/kyverno/pkg/client/clientset/versioned"
 	kyvernov1informers "github.com/kyverno/kyverno/pkg/client/informers/externalversions/kyverno/v1"
-	policiesv1alpha1informers "github.com/kyverno/kyverno/pkg/client/informers/externalversions/policies.kyverno.io/v1alpha1"
 	policiesv1beta1informers "github.com/kyverno/kyverno/pkg/client/informers/externalversions/policies.kyverno.io/v1beta1"
 	kyvernov1listers "github.com/kyverno/kyverno/pkg/client/listers/kyverno/v1"
-	policiesv1alpha1listers "github.com/kyverno/kyverno/pkg/client/listers/policies.kyverno.io/v1alpha1"
 	policiesv1beta1listers "github.com/kyverno/kyverno/pkg/client/listers/policies.kyverno.io/v1beta1"
 	"github.com/kyverno/kyverno/pkg/clients/dclient"
 	"github.com/kyverno/kyverno/pkg/controllers"
@@ -69,9 +66,12 @@ type controller struct {
 	cpolLister     kyvernov1listers.ClusterPolicyLister
 	vpolLister     policiesv1beta1listers.ValidatingPolicyLister
 	nvpolLister    policiesv1beta1listers.NamespacedValidatingPolicyLister
-	ivpolLister    policiesv1alpha1listers.ImageValidatingPolicyLister
-	gpolLister     policiesv1alpha1listers.GeneratingPolicyLister
-	mpolLister     policiesv1alpha1listers.MutatingPolicyLister
+	ivpolLister    policiesv1beta1listers.ImageValidatingPolicyLister
+	nivpolLister   policiesv1beta1listers.NamespacedImageValidatingPolicyLister
+	gpolLister     policiesv1beta1listers.GeneratingPolicyLister
+	ngpolLister    policiesv1beta1listers.NamespacedGeneratingPolicyLister
+	mpolLister     policiesv1beta1listers.MutatingPolicyLister
+	nmpolLister    policiesv1beta1listers.NamespacedMutatingPolicyLister
 	vapLister      admissionregistrationv1listers.ValidatingAdmissionPolicyLister
 	mapLister      admissionregistrationv1beta1listers.MutatingAdmissionPolicyLister
 	mapAlphaLister admissionregistrationv1alpha1listers.MutatingAdmissionPolicyLister
@@ -102,9 +102,12 @@ func NewController(
 	cpolInformer kyvernov1informers.ClusterPolicyInformer,
 	vpolInformer policiesv1beta1informers.ValidatingPolicyInformer,
 	nvpolInformer policiesv1beta1informers.NamespacedValidatingPolicyInformer,
-	ivpolInformer policiesv1alpha1informers.ImageValidatingPolicyInformer,
-	gpolInformer policiesv1alpha1informers.GeneratingPolicyInformer,
-	mpolInformer policiesv1alpha1informers.MutatingPolicyInformer,
+	ivpolInformer policiesv1beta1informers.ImageValidatingPolicyInformer,
+	nivpolInformer policiesv1beta1informers.NamespacedImageValidatingPolicyInformer,
+	gpolInformer policiesv1beta1informers.GeneratingPolicyInformer,
+	ngpolInformer policiesv1beta1informers.NamespacedGeneratingPolicyInformer,
+	mpolInformer policiesv1beta1informers.MutatingPolicyInformer,
+	nmpolInformer policiesv1beta1informers.NamespacedMutatingPolicyInformer,
 	vapInformer admissionregistrationv1informers.ValidatingAdmissionPolicyInformer,
 	mapInformer admissionregistrationv1beta1informers.MutatingAdmissionPolicyInformer,
 	mapAlphaInformer admissionregistrationv1alpha1informers.MutatingAdmissionPolicyInformer,
@@ -223,16 +226,18 @@ func NewController(
 					continue
 				}
 				for _, polNsName := range sets.List(policiesForReport) {
-					policyNameParts := strings.Split(polNsName, "/")
-					if o.GetNamespace() == "" { // if its a cluster policy the cache will contain the policy name only
-						if o.GetName() != policyNameParts[0] {
+					polNs, polName, err := cache.SplitMetaNamespaceKey(polNsName)
+					if err != nil {
+						continue
+					}
+					if o.GetNamespace() == "" {
+						// cluster-scoped policy event: only match cache entries without a namespace
+						if polNs != "" || o.GetName() != polName {
 							continue
 						}
 					} else {
-						if o.GetNamespace() != policyNameParts[0] {
-							continue
-						}
-						if o.GetName() != policyNameParts[1] {
+						// namespaced policy event: only match cache entries with a namespace
+						if polNs == "" || o.GetNamespace() != polNs || o.GetName() != polName {
 							continue
 						}
 					}
@@ -319,6 +324,17 @@ func NewController(
 			logger.Error(err, "failed to register event handlers")
 		}
 	}
+	if nivpolInformer != nil {
+		c.nivpolLister = nivpolInformer.Lister()
+		if _, err := controllerutils.AddEventHandlersT(
+			nivpolInformer.Informer(),
+			func(o metav1.Object) { enqueueReportsForPolicy(o) },
+			func(_, o metav1.Object) { enqueueReportsForPolicy(o) },
+			func(o metav1.Object) { enqueueReportsForPolicy(o) },
+		); err != nil {
+			logger.Error(err, "failed to register event handlers")
+		}
+	}
 	if mpolInformer != nil {
 		c.mpolLister = mpolInformer.Lister()
 		if _, err := controllerutils.AddEventHandlersT(
@@ -330,10 +346,32 @@ func NewController(
 			logger.Error(err, "failed to register event handlers")
 		}
 	}
+	if nmpolInformer != nil {
+		c.nmpolLister = nmpolInformer.Lister()
+		if _, err := controllerutils.AddEventHandlersT(
+			nmpolInformer.Informer(),
+			func(o metav1.Object) { enqueueReportsForPolicy(o) },
+			func(_, o metav1.Object) { enqueueReportsForPolicy(o) },
+			func(o metav1.Object) { enqueueReportsForPolicy(o) },
+		); err != nil {
+			logger.Error(err, "failed to register event handlers")
+		}
+	}
 	if gpolInformer != nil {
 		c.gpolLister = gpolInformer.Lister()
 		if _, err := controllerutils.AddEventHandlersT(
 			gpolInformer.Informer(),
+			func(o metav1.Object) { enqueueReportsForPolicy(o) },
+			func(_, o metav1.Object) { enqueueReportsForPolicy(o) },
+			func(o metav1.Object) { enqueueReportsForPolicy(o) },
+		); err != nil {
+			logger.Error(err, "failed to register event handlers")
+		}
+	}
+	if ngpolInformer != nil {
+		c.ngpolLister = ngpolInformer.Lister()
+		if _, err := controllerutils.AddEventHandlersT(
+			ngpolInformer.Informer(),
 			func(o metav1.Object) { enqueueReportsForPolicy(o) },
 			func(_, o metav1.Object) { enqueueReportsForPolicy(o) },
 			func(o metav1.Object) { enqueueReportsForPolicy(o) },
@@ -469,18 +507,13 @@ func (c *controller) createVPolMap() (sets.Set[string], error) {
 			results.Insert(cache.MetaObjectToName(&vpol).String())
 		}
 	}
-	return results, nil
-}
-
-func (c *controller) createNVPolMap() (sets.Set[string], error) {
-	results := sets.New[string]()
 	if c.nvpolLister != nil {
-		nvpols, err := c.nvpolLister.List(labels.Everything())
+		vpols, err := utils.FetchNamespacedValidatingPolicies(c.nvpolLister, "")
 		if err != nil {
 			return nil, err
 		}
-		for _, nvpol := range nvpols {
-			results.Insert(cache.MetaObjectToName(nvpol).String())
+		for _, vpol := range vpols {
+			results.Insert(cache.MetaObjectToName(&vpol).String())
 		}
 	}
 	return results, nil
@@ -490,6 +523,15 @@ func (c *controller) createIVPolMap() (sets.Set[string], error) {
 	results := sets.New[string]()
 	if c.ivpolLister != nil {
 		ivpols, err := utils.FetchImageVerificationPolicies(c.ivpolLister)
+		if err != nil {
+			return nil, err
+		}
+		for _, ivpol := range ivpols {
+			results.Insert(cache.MetaObjectToName(&ivpol).String())
+		}
+	}
+	if c.nivpolLister != nil {
+		ivpols, err := utils.FetchNamespacedImageVerificationPolicies(c.nivpolLister, "")
 		if err != nil {
 			return nil, err
 		}
@@ -511,6 +553,15 @@ func (c *controller) createGPOLMap() (sets.Set[string], error) {
 			results.Insert(cache.MetaObjectToName(&gpol).String())
 		}
 	}
+	if c.ngpolLister != nil {
+		gpols, err := utils.FetchNamespacedGeneratingPolicies(c.ngpolLister, "")
+		if err != nil {
+			return nil, err
+		}
+		for _, gpol := range gpols {
+			results.Insert(cache.MetaObjectToName(&gpol).String())
+		}
+	}
 	return results, nil
 }
 
@@ -518,6 +569,15 @@ func (c *controller) createMPOLMap() (sets.Set[string], error) {
 	results := sets.New[string]()
 	if c.mpolLister != nil {
 		mpols, err := utils.FetchMutatingPolicies(c.mpolLister)
+		if err != nil {
+			return nil, err
+		}
+		for _, mpol := range mpols {
+			results.Insert(cache.MetaObjectToName(&mpol).String())
+		}
+	}
+	if c.nmpolLister != nil {
+		mpols, err := utils.FetchNamespacedMutatingPolicies(c.nmpolLister, "")
 		if err != nil {
 			return nil, err
 		}
@@ -778,10 +838,6 @@ func (c *controller) backReconcile(ctx context.Context, logger logr.Logger, _, n
 	if err != nil {
 		return err
 	}
-	nvpolMap, err := c.createNVPolMap()
-	if err != nil {
-		return err
-	}
 	ivpolMap, err := c.createIVPolMap()
 	if err != nil {
 		return err
@@ -799,7 +855,6 @@ func (c *controller) backReconcile(ctx context.Context, logger logr.Logger, _, n
 		vap:    vapMap,
 		mappol: mappolMap,
 		vpol:   vpolMap,
-		nvpol:  nvpolMap,
 		ivpol:  ivpolMap,
 		gpol:   gpolMap,
 		mpol:   mpolMap,

@@ -4,9 +4,9 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
-	"github.com/kyverno/kyverno/api/policies.kyverno.io/v1alpha1"
-	"github.com/kyverno/kyverno/pkg/cel/libs/versions"
-	"github.com/kyverno/kyverno/pkg/imageverification/imagedataloader"
+	policiesv1beta1 "github.com/kyverno/api/api/policies.kyverno.io/v1beta1"
+	"github.com/kyverno/sdk/extensions/cel/libs/versions"
+	"github.com/kyverno/sdk/extensions/imagedataloader"
 	"k8s.io/apimachinery/pkg/util/version"
 	apiservercel "k8s.io/apiserver/pkg/cel"
 	k8scorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -18,15 +18,15 @@ type lib struct {
 	logger  logr.Logger
 	version *version.Version
 	imgCtx  imagedataloader.ImageContext
-	ivpol   *v1alpha1.ImageValidatingPolicy
+	ivpol   policiesv1beta1.ImageValidatingPolicyLike
 	lister  k8scorev1.SecretInterface
 }
 
 func Latest() *version.Version {
-	return versions.ImageVerifyVersion
+	return versions.KyvernoLatest
 }
 
-func Lib(v *version.Version, imgCtx imagedataloader.ImageContext, ivpol *v1alpha1.ImageValidatingPolicy, lister k8scorev1.SecretInterface) cel.EnvOption {
+func Lib(v *version.Version, imgCtx imagedataloader.ImageContext, ivpol policiesv1beta1.ImageValidatingPolicyLike, lister k8scorev1.SecretInterface) cel.EnvOption {
 	// create the cel lib env option
 	return cel.Lib(&lib{
 		version: v,
@@ -55,7 +55,6 @@ func (*lib) ProgramOptions() []cel.ProgramOption {
 }
 
 func (c *lib) extendEnv(env *cel.Env) (*cel.Env, error) {
-	// create implementation, recording the envoy types aware adapter
 	impl, err := ImageVerifyCELFuncs(c.logger, c.imgCtx, c.ivpol, c.lister, env.CELTypeAdapter())
 	if err != nil {
 		return nil, err

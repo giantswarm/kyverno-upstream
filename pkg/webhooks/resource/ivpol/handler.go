@@ -16,7 +16,7 @@ import (
 	engineapi "github.com/kyverno/kyverno/pkg/engine/api"
 	"github.com/kyverno/kyverno/pkg/engine/mutate/patch"
 	"github.com/kyverno/kyverno/pkg/event"
-	eval "github.com/kyverno/kyverno/pkg/imageverification/evaluator"
+	eval "github.com/kyverno/kyverno/pkg/image/verification/evaluator"
 	admissionutils "github.com/kyverno/kyverno/pkg/utils/admission"
 	jsonutils "github.com/kyverno/kyverno/pkg/utils/json"
 	reportutils "github.com/kyverno/kyverno/pkg/utils/report"
@@ -33,7 +33,6 @@ type handler struct {
 	engine           ivpolengine.Engine
 	kyvernoClient    versioned.Interface
 	admissionReports bool
-	reportConfig     reportutils.ReportingConfiguration
 	eventGen         event.Interface
 }
 
@@ -42,7 +41,6 @@ func New(
 	context libs.Context,
 	kyvernoClient versioned.Interface,
 	admissionReports bool,
-	reportConfig reportutils.ReportingConfiguration,
 	eventGen event.Interface,
 ) *handler {
 	return &handler{
@@ -50,7 +48,6 @@ func New(
 		engine:           engine,
 		kyvernoClient:    kyvernoClient,
 		admissionReports: admissionReports,
-		reportConfig:     reportConfig,
 		eventGen:         eventGen,
 	}
 }
@@ -148,14 +145,14 @@ func (h *handler) audit(ctx context.Context, logger logr.Logger, admissionReques
 				Rules: []engineapi.RuleResponse{r.Result},
 			},
 		}
-		engineResponse = engineResponse.WithPolicy(engineapi.NewImageValidatingPolicy(r.Policy))
+		engineResponse = engineResponse.WithPolicy(engineapi.NewImageValidatingPolicyFromLike(r.Policy))
 		allEngineResponses = append(allEngineResponses, engineResponse)
 		if reportutils.IsPolicyReportable(r.Policy) {
 			reportableEngineResponses = append(reportableEngineResponses, engineResponse)
 		}
 	}
 
-	if !blocked && validation.NeedsReports(admissionRequest, *response.Resource, h.admissionReports, h.reportConfig) {
+	if !blocked && validation.NeedsReports(admissionRequest, *response.Resource, h.admissionReports) {
 		err := h.admissionReport(ctx, request, response, reportableEngineResponses)
 		if err != nil {
 			logger.Error(err, "failed to create report")

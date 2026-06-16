@@ -1,4 +1,4 @@
-apiVersion: policies.kyverno.io/v1alpha1
+apiVersion: policies.kyverno.io/v1beta1
 kind: GeneratingPolicy
 metadata:
   name: foreach-clone-list-sync-create
@@ -19,4 +19,4 @@ spec:
       expression: resource.List("v1", "secrets", "default")
   generate:
     - expression: >
-        variables.nsList.all(ns, generator.Apply(ns, [variables.sources]))
+        variables.nsList.all(ns, generator.apply(ns, [variables.sources]))

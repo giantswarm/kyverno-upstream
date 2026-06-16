@@ -5162,7 +5162,8 @@ It can be of one of these values: default,google,azure,amazon,github.</p>
           
 
           <p>Secrets specifies a list of secrets that are provided for credentials.
-Secrets must live in the Kyverno namespace.</p>
+Secrets can be specified as a name (Kyverno namespace) or namespace/name.
+imagePullSecrets from the resource namespace are also used.</p>
 
 
           
@@ -6762,7 +6763,7 @@ Allowed values are privileged, baseline, and restricted.</p>
           
 
           <p>Version defines the Pod Security Standard versions that Kubernetes supports.
-Allowed values are v1.19, v1.20, v1.21, v1.22, v1.23, v1.24, v1.25, v1.26, v1.27, v1.28, v1.29, latest. Defaults to latest.</p>
+Allowed values are v1.19, v1.20, v1.21, v1.22, v1.23, v1.24, v1.25, v1.26, v1.27, v1.28, v1.29, v1.30, v1.31, v1.32, latest. Defaults to latest.</p>
 
 
           

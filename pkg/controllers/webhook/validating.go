@@ -1,18 +1,19 @@
 package webhook
 
 import (
+	"context"
 	"maps"
 	"path"
 	"slices"
 
-	policiesv1alpha1 "github.com/kyverno/kyverno/api/policies.kyverno.io/v1alpha1"
-	policiesv1beta1 "github.com/kyverno/kyverno/api/policies.kyverno.io/v1beta1"
+	policiesv1beta1 "github.com/kyverno/api/api/policies.kyverno.io/v1beta1"
 	"github.com/kyverno/kyverno/pkg/cel/autogen"
 	ivpolautogen "github.com/kyverno/kyverno/pkg/cel/policies/ivpol/autogen"
 	mpolautogen "github.com/kyverno/kyverno/pkg/cel/policies/mpol/autogen"
 	vpolautogen "github.com/kyverno/kyverno/pkg/cel/policies/vpol/autogen"
 	"github.com/kyverno/kyverno/pkg/config"
 	engineapi "github.com/kyverno/kyverno/pkg/engine/api"
+	"github.com/kyverno/kyverno/pkg/toggle"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -60,7 +61,7 @@ func buildWebhookRules(cfg config.Configuration, server, name, queryPath string,
 				webhook.MatchConditions = append(webhook.MatchConditions, validConditions(expressionCache, p.GetMatchConditions())...)
 			}
 
-			if _, ok := p.(*policiesv1alpha1.GeneratingPolicy); ok {
+			if _, ok := p.(*policiesv1beta1.GeneratingPolicy); ok {
 				// all four operations including CONNECT are needed for generate.
 				for _, match := range p.GetMatchConstraints().ResourceRules {
 					rule := match.RuleWithOperations
@@ -77,7 +78,7 @@ func buildWebhookRules(cfg config.Configuration, server, name, queryPath string,
 					webhook.Rules = append(webhook.Rules, match.RuleWithOperations)
 				}
 			}
-			if vpol, ok := p.(*policiesv1beta1.ValidatingPolicy); ok {
+			if vpol := policy.AsValidatingPolicyLike(); vpol != nil {
 				policies, err := vpolautogen.Autogen(vpol)
 				if err != nil {
 					continue
@@ -93,8 +94,8 @@ func buildWebhookRules(cfg config.Configuration, server, name, queryPath string,
 					}
 				}
 			}
-			if nvpol, ok := p.(*policiesv1beta1.NamespacedValidatingPolicy); ok {
-				policies, err := vpolautogen.Autogen(nvpol)
+			if ivpol, ok := p.(*policiesv1beta1.ImageValidatingPolicy); ok {
+				policies, err := ivpolautogen.Autogen(ivpol)
 				if err != nil {
 					continue
 				}
@@ -109,44 +110,20 @@ func buildWebhookRules(cfg config.Configuration, server, name, queryPath string,
 					}
 				}
 			}
-			if ivpol, ok := p.(*policiesv1alpha1.ImageValidatingPolicy); ok {
-				policies, err := ivpolautogen.Autogen(ivpol)
-				if err != nil {
-					continue
-				}
-				for _, config := range slices.Sorted(maps.Keys(policies)) {
-					policy := policies[config]
-					targets := make([]policiesv1beta1.Target, 0, len(policy.Targets))
-					for _, target := range policy.Targets {
-						targets = append(targets, policiesv1beta1.Target(target))
-					}
-					webhook.MatchConditions = append(
-						webhook.MatchConditions,
-						autogen.CreateMatchConditions(config, targets, validConditions(expressionCache, policy.Spec.MatchConditions))...,
-					)
-					for _, match := range policy.Spec.MatchConstraints.ResourceRules {
-						webhook.Rules = append(webhook.Rules, match.RuleWithOperations)
-					}
-				}
-			}
 
-			if mpol, ok := p.(*policiesv1alpha1.MutatingPolicy); ok {
+			if mpol := policy.AsMutatingPolicyLike(); mpol != nil {
 				policies, err := mpolautogen.Autogen(mpol)
 				if err != nil {
 					logger.Error(err, "failed to auto-generate mutating policy", "policy", mpol.GetName())
 					continue
 				}
 				for _, config := range slices.Sorted(maps.Keys(policies)) {
-					policy := policies[config]
-					targets := make([]policiesv1beta1.Target, 0, len(policy.Targets))
-					for _, target := range policy.Targets {
-						targets = append(targets, policiesv1beta1.Target(target))
-					}
+					autogenPolicy := policies[config]
 					webhook.MatchConditions = append(
 						webhook.MatchConditions,
-						autogen.CreateMatchConditions(config, targets, validConditions(expressionCache, policy.Spec.GetMatchConditions()))...,
+						autogen.CreateMatchConditions(config, autogenPolicy.Targets, validConditions(expressionCache, autogenPolicy.Spec.MatchConditions))...,
 					)
-					for _, match := range policy.Spec.MatchConstraints.ResourceRules {
+					for _, match := range autogenPolicy.Spec.MatchConstraints.ResourceRules {
 						webhook.Rules = append(webhook.Rules, match.RuleWithOperations)
 					}
 				}
@@ -158,9 +135,9 @@ func buildWebhookRules(cfg config.Configuration, server, name, queryPath string,
 			if p.GetTimeoutSeconds() != nil {
 				webhook.TimeoutSeconds = p.GetTimeoutSeconds()
 			}
-			if p.GetFailurePolicy() == admissionregistrationv1.Ignore {
+			if p.GetFailurePolicy(toggle.FromContext(context.TODO()).ForceFailurePolicyIgnore()) == admissionregistrationv1.Ignore {
 				webhook.FailurePolicy = ptr.To(admissionregistrationv1.Ignore)
-				webhook.Name = name + "-ignore-finegrained-" + p.GetName()
+				webhook.Name = generateName(name+"-ignore-finegrained", p)
 				webhook.ClientConfig = newClientConfig(server, servicePort, caBundle, path.Join(queryPath, p.GetName()))
 				webhook.NamespaceSelector = mergeLabelSelectors(
 					p.GetMatchConstraints().NamespaceSelector,
@@ -173,7 +150,7 @@ func buildWebhookRules(cfg config.Configuration, server, name, queryPath string,
 				fineGrainedIgnoreList = append(fineGrainedIgnoreList, webhook)
 			} else {
 				webhook.FailurePolicy = ptr.To(admissionregistrationv1.Fail)
-				webhook.Name = name + "-fail-finegrained-" + p.GetName()
+				webhook.Name = generateName(name+"-fail-finegrained", p)
 				webhook.ClientConfig = newClientConfig(server, servicePort, caBundle, path.Join(queryPath, p.GetName()))
 				webhook.NamespaceSelector = mergeLabelSelectors(
 					p.GetMatchConstraints().NamespaceSelector,
@@ -247,7 +224,7 @@ func buildWebhookRules(cfg config.Configuration, server, name, queryPath string,
 					}
 				}
 			}
-			if ivpol, ok := p.(*policiesv1alpha1.ImageValidatingPolicy); ok {
+			if ivpol, ok := p.(*policiesv1beta1.ImageValidatingPolicy); ok {
 				autogeneratedIvPols, err := ivpolautogen.Autogen(ivpol)
 				if err != nil {
 					continue
@@ -258,7 +235,18 @@ func buildWebhookRules(cfg config.Configuration, server, name, queryPath string,
 					}
 				}
 			}
-			if mpol, ok := p.(*policiesv1alpha1.MutatingPolicy); ok {
+			if nivpol, ok := p.(*policiesv1beta1.NamespacedImageValidatingPolicy); ok {
+				autogeneratedNivPols, err := ivpolautogen.Autogen(nivpol)
+				if err != nil {
+					continue
+				}
+				for _, p := range autogeneratedNivPols {
+					for _, match := range p.Spec.MatchConstraints.ResourceRules {
+						webhookRules = append(webhookRules, match.RuleWithOperations)
+					}
+				}
+			}
+			if mpol := policy.AsMutatingPolicy(); mpol != nil {
 				rules, err := mpolautogen.Autogen(mpol)
 				if err != nil {
 					continue
@@ -269,7 +257,18 @@ func buildWebhookRules(cfg config.Configuration, server, name, queryPath string,
 					}
 				}
 			}
-			if _, ok := p.(*policiesv1alpha1.GeneratingPolicy); ok {
+			if nmpol := policy.AsNamespacedMutatingPolicy(); nmpol != nil {
+				rules, err := mpolautogen.Autogen(nmpol)
+				if err != nil {
+					continue
+				}
+				for _, rule := range rules {
+					for _, match := range rule.Spec.MatchConstraints.ResourceRules {
+						webhookRules = append(webhookRules, match.RuleWithOperations)
+					}
+				}
+			}
+			if _, ok := p.(*policiesv1beta1.GeneratingPolicy); ok {
 				// all four operations including CONNECT are needed for generate.
 				for _, match := range p.GetMatchConstraints().ResourceRules {
 					rule := match.RuleWithOperations
@@ -286,7 +285,7 @@ func buildWebhookRules(cfg config.Configuration, server, name, queryPath string,
 					webhookRules = append(webhookRules, match.RuleWithOperations)
 				}
 			}
-			if p.GetFailurePolicy() == admissionregistrationv1.Ignore {
+			if p.GetFailurePolicy(toggle.FromContext(context.TODO()).ForceFailurePolicyIgnore()) == admissionregistrationv1.Ignore {
 				webhookIgnore.Rules = append(webhookIgnore.Rules, webhookRules...)
 			} else {
 				webhookFail.Rules = append(webhookFail.Rules, webhookRules...)
@@ -342,4 +341,12 @@ func validConditions(celExpressionCache *expressionCache, conditions []admission
 		return conditions
 	}
 	return nil
+}
+
+func generateName(name string, policy policiesv1beta1.GenericPolicy) string {
+	if ns := policy.GetNamespace(); ns != "" {
+		return name + "-" + ns + "-" + policy.GetName()
+	}
+
+	return name + "-" + policy.GetName()
 }

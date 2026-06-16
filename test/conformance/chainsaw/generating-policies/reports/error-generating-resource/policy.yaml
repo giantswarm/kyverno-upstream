@@ -1,4 +1,4 @@
-apiVersion: policies.kyverno.io/v1alpha1
+apiVersion: policies.kyverno.io/v1beta1
 kind: GeneratingPolicy
 metadata:
   name: error-generating-resource
@@ -32,4 +32,4 @@ spec:
         ]
   generate:
     - expression: >
-        variables.nsList.all(ns, generator.Apply(ns, variables.networkpolicy))
+        variables.nsList.all(ns, generator.apply(ns, variables.networkpolicy))

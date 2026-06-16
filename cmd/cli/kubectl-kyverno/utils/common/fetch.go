@@ -2,10 +2,12 @@ package common
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-git/go-billy/v5"
 	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
@@ -14,6 +16,7 @@ import (
 	"github.com/kyverno/kyverno/cmd/cli/kubectl-kyverno/resource"
 	"github.com/kyverno/kyverno/pkg/admissionpolicy"
 	"github.com/kyverno/kyverno/pkg/autogen"
+	"github.com/kyverno/kyverno/pkg/cli/loader"
 	"github.com/kyverno/kyverno/pkg/clients/dclient"
 	engineapi "github.com/kyverno/kyverno/pkg/engine/api"
 	kubeutils "github.com/kyverno/kyverno/pkg/utils/kube"
@@ -23,6 +26,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
+
+var errOpenResourceFile = errors.New("open resource file")
 
 type resourceTypeInfo struct {
 	gvkMap         map[schema.GroupVersionKind]bool
@@ -37,6 +42,8 @@ type ResourceFetcher struct {
 	Namespace            string
 	PolicyReport         bool
 	ClusterWideResources bool
+	ResourceOptions      loader.ResourceOptions
+	ShowPerformance      bool
 }
 
 // GetResources gets matched resources by the given policies
@@ -95,10 +102,50 @@ func (rf *ResourceFetcher) getFromCluster() ([]*unstructured.Unstructured, error
 	}
 	// extract the matched resources from the policies.
 	rf.extractResourcesFromPolicies(info)
+	resourceMap := make(map[string]*unstructured.Unstructured)
+	var err error
 	// fetch the resources from the cluster.
-	resourceMap, err := rf.listResources(info)
-	if err != nil {
-		return nil, err
+	if rf.ResourceOptions.Concurrency > 1 {
+		log.Log.V(3).Info("Loading resources concurrently", "count", len(info.gvkMap))
+		// Convert gvkMaps to slice
+		gvks := make([]schema.GroupVersionKind, 0, len(info.gvkMap))
+		for gvk := range info.gvkMap {
+			gvks = append(gvks, gvk)
+		}
+		rf.ResourceOptions.ResourceTypes = gvks
+		resourceList, err := loader.LoadResourcesConcurrent(rf.Policies, rf.Client, rf.ResourceOptions, rf.ShowPerformance)
+		if err != nil {
+			return nil, err
+		}
+		for _, resource := range resourceList {
+			key := fmt.Sprintf("%s-%s-%s", resource.GroupVersionKind(), resource.GetNamespace(), resource.GetName())
+			resourceMap[key] = resource.DeepCopy()
+		}
+
+		if len(info.subresourceMap) > 0 {
+			var subResourceGvks []schema.GroupVersionKind
+			for subGvk := range info.subresourceMap {
+				subResourceGvks = append(subResourceGvks, subGvk)
+			}
+			rf.ResourceOptions.ResourceTypes = subResourceGvks
+			subResourceList, err := loader.LoadResourcesConcurrent(rf.Policies, rf.Client, rf.ResourceOptions, rf.ShowPerformance)
+			log.Log.V(3).Info("Loading sublist concurrently", "count", len(subResourceList))
+			if err != nil {
+				return nil, err
+			}
+			for _, resource := range subResourceList {
+				key := fmt.Sprintf("%s-%s-%s", resource.GroupVersionKind(), resource.GetNamespace(), resource.GetName())
+				resourceMap[key] = resource.DeepCopy()
+			}
+		}
+	} else {
+		start := time.Now()
+		log.Log.V(3).Info("Loading resources sequentially...")
+		resourceMap, err = rf.listResources(info)
+		if err != nil {
+			return nil, err
+		}
+		log.Log.V(3).Info("Loaded resources in", "duration", time.Since(start))
 	}
 	if len(rf.ResourcePaths) == 0 {
 		for _, rr := range resourceMap {
@@ -142,11 +189,31 @@ func (rf *ResourceFetcher) extractResourcesFromPolicies(info *resourceTypeInfo) 
 				matchResources = ivp.Spec.MatchConstraints
 			} else if dp := policy.AsDeletingPolicy(); dp != nil {
 				matchResources = dp.GetDeletingPolicySpec().MatchConstraints
+			} else if cp := policy.AsCleanupPolicy(); cp != nil {
+				// CleanupPolicy match resources are Kyverno-specific match resources.
+				// For cluster fetching, translate the cleanup policy's match/exclude kinds into candidate GVKs.
+				if spec := cp.GetSpec(); spec != nil {
+					for _, kind := range spec.MatchResources.GetKinds() {
+						rf.addToresourceTypeInfo(kind, info)
+					}
+					if spec.ExcludeResources != nil {
+						for _, kind := range spec.ExcludeResources.GetKinds() {
+							rf.addToresourceTypeInfo(kind, info)
+						}
+					}
+				}
+				continue
 			} else if mapPolicy := policy.AsMutatingAdmissionPolicy(); mapPolicy != nil {
 				converted := admissionpolicy.ConvertMatchResources(mapPolicy.GetDefinition().Spec.MatchConstraints)
 				matchResources = converted
 			} else if gpol := policy.AsGeneratingPolicy(); gpol != nil {
 				matchResources = gpol.Spec.MatchConstraints
+			} else if ngpol := policy.AsNamespacedGeneratingPolicy(); ngpol != nil {
+				matchResources = ngpol.Spec.MatchConstraints
+			} else if mp := policy.AsMutatingPolicy(); mp != nil {
+				matchResources = mp.Spec.MatchConstraints
+			} else if nmp := policy.AsNamespacedMutatingPolicy(); nmp != nil {
+				matchResources = nmp.Spec.MatchConstraints
 			}
 			rf.getKindsFromPolicy(matchResources, info)
 		}
@@ -185,7 +252,7 @@ func (rf *ResourceFetcher) getKindsFromPolicy(
 	matchResources *admissionregistrationv1.MatchResources,
 	info *resourceTypeInfo,
 ) {
-	restMapper, err := utils.GetRESTMapper(rf.Client, false)
+	restMapper, err := utils.GetRESTMapper(rf.Client)
 	if err != nil {
 		log.Log.V(3).Info("failed to get rest mapper", "error", err)
 		return
@@ -307,12 +374,11 @@ func GetResourcesWithTest(out io.Writer, fs billy.Filesystem, resourcePaths []st
 			var resourceBytes []byte
 			var err error
 			if fs != nil {
-				filep, err := fs.Open(filepath.Join(policyResourcePath, resourcePath))
-				if err != nil {
-					fmt.Fprintf(out, "Unable to open resource file: %s. error: %s", resourcePath, err)
+				resourceBytes, err = readResourceBytes(fs, filepath.Join(policyResourcePath, resourcePath))
+				if errors.Is(err, errOpenResourceFile) {
+					fmt.Fprintf(out, "Unable to open resource file: %s. error: %s", resourcePath, errors.Unwrap(err))
 					continue
 				}
-				resourceBytes, _ = io.ReadAll(filep)
 			} else {
 				resourceBytes, err = resource.GetFileBytes(resourcePath)
 			}
@@ -330,4 +396,16 @@ func GetResourcesWithTest(out io.Writer, fs billy.Filesystem, resourcePaths []st
 		}
 	}
 	return resources, nil
+}
+
+func readResourceBytes(fs billy.Filesystem, path string) ([]byte, error) {
+	filep, err := fs.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errOpenResourceFile, err)
+	}
+	resourceBytes, err := io.ReadAll(filep)
+	if closeErr := filep.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	return resourceBytes, err
 }

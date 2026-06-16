@@ -8,12 +8,11 @@ import (
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
-	"github.com/kyverno/kyverno/api/policies.kyverno.io/v1alpha1"
+	v1beta1 "github.com/kyverno/api/api/policies.kyverno.io/v1beta1"
 	"github.com/kyverno/kyverno/pkg/cel/compiler"
 	"github.com/kyverno/kyverno/pkg/cel/engine"
 	"github.com/kyverno/kyverno/pkg/cel/libs"
 	"github.com/stretchr/testify/assert"
-
 	admissionv1 "k8s.io/api/admission/v1"
 	v1 "k8s.io/api/admissionregistration/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -69,8 +68,8 @@ func TestPolicyEvaluate(t *testing.T) {
 			exceptions: []compiler.Exception{
 				{
 					MatchConditions: []cel.Program{},
-					Exception: &v1alpha1.PolicyException{
-						Spec: v1alpha1.PolicyExceptionSpec{
+					Exception: &v1beta1.PolicyException{
+						Spec: v1beta1.PolicyExceptionSpec{
 							MatchConditions: []v1.MatchCondition{
 								{Name: "valid", Expression: "object.metadata.namespace == 'test-ns'"},
 							},

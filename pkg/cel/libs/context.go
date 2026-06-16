@@ -3,20 +3,22 @@ package libs
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/kyverno/kyverno/api/kyverno"
 	"github.com/kyverno/kyverno/pkg/background/common"
-	"github.com/kyverno/kyverno/pkg/cel/libs/generator"
-	"github.com/kyverno/kyverno/pkg/cel/libs/globalcontext"
-	"github.com/kyverno/kyverno/pkg/cel/libs/imagedata"
-	"github.com/kyverno/kyverno/pkg/cel/libs/resource"
-	"github.com/kyverno/kyverno/pkg/cel/utils"
 	"github.com/kyverno/kyverno/pkg/clients/dclient"
 	"github.com/kyverno/kyverno/pkg/config"
 	gctxstore "github.com/kyverno/kyverno/pkg/globalcontext/store"
-	"github.com/kyverno/kyverno/pkg/imageverification/imagedataloader"
 	"github.com/kyverno/kyverno/pkg/logging"
 	kubeutils "github.com/kyverno/kyverno/pkg/utils/kube"
+	"github.com/kyverno/sdk/extensions/cel/libs/generator"
+	"github.com/kyverno/sdk/extensions/cel/libs/globalcontext"
+	"github.com/kyverno/sdk/extensions/cel/libs/imagedata"
+	"github.com/kyverno/sdk/extensions/cel/libs/resource"
+	"github.com/kyverno/sdk/extensions/cel/utils"
+	"github.com/kyverno/sdk/extensions/imagedataloader"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,7 +27,20 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/klog/v2"
 )
+
+// a global store for the libaries context, gets initialized when NewContextProvider gets called
+// in the controller main functions
+var LibraryContext Context
+
+func GetLibsCtx() Context {
+	if LibraryContext == nil {
+		klog.V(2).Info("global library context was nil, setting to a fake context. If a real context is needed ensure that the variable is set")
+		LibraryContext = NewFakeContextProvider()
+	}
+	return LibraryContext
+}
 
 type Context interface {
 	globalcontext.ContextInterface
@@ -33,6 +48,7 @@ type Context interface {
 	resource.ContextInterface
 	generator.ContextInterface
 
+	GetHTTPMocks() map[string]interface{}
 	GetGeneratedResources() []*unstructured.Unstructured
 	ClearGeneratedResources()
 	SetGenerateContext(polName, triggerName, triggerNamespace, triggerAPIVersion, triggerGroup, triggerKind, triggerUID string, restoreCache bool)
@@ -70,14 +86,20 @@ func NewContextProvider(
 	if err != nil {
 		return nil, err
 	}
-	return &contextProvider{
+	ctx := &contextProvider{
 		client:             client,
 		imagedata:          idl,
 		gctxStore:          gctxStore,
 		cliEvaluation:      cliEvaluation,
 		restMapper:         restMapper,
 		generatedResources: make([]*unstructured.Unstructured, 0),
-	}, nil
+	}
+	LibraryContext = ctx
+	return ctx, nil
+}
+
+func (cp *contextProvider) GetHTTPMocks() map[string]interface{} {
+	return nil
 }
 
 func (cp *contextProvider) GetGlobalReference(name, projection string) (any, error) {
@@ -137,8 +159,12 @@ func (cp *contextProvider) GetResource(apiVersion, resource, namespace, name str
 	if err != nil {
 		return nil, err
 	}
+	parts := strings.Split(resource, "/")
+	resource = parts[0]
+	subresources := parts[1:]
+
 	resourceInteface := cp.getResourceClient(groupVersion, resource, namespace)
-	return resourceInteface.Get(context.TODO(), name, metav1.GetOptions{})
+	return resourceInteface.Get(context.TODO(), name, metav1.GetOptions{}, subresources...)
 }
 
 func (cp *contextProvider) PostResource(apiVersion, resource, namespace string, data map[string]any) (*unstructured.Unstructured, error) {
@@ -146,8 +172,12 @@ func (cp *contextProvider) PostResource(apiVersion, resource, namespace string, 
 	if err != nil {
 		return nil, err
 	}
+	parts := strings.Split(resource, "/")
+	resource = parts[0]
+	subresources := parts[1:]
+
 	resourceInteface := cp.getResourceClient(groupVersion, resource, namespace)
-	return resourceInteface.Create(context.TODO(), &unstructured.Unstructured{Object: data}, metav1.CreateOptions{})
+	return resourceInteface.Create(context.TODO(), &unstructured.Unstructured{Object: data}, metav1.CreateOptions{}, subresources...)
 }
 
 func (cp *contextProvider) GenerateResources(namespace string, dataList []map[string]any) error {
@@ -168,27 +198,40 @@ func (cp *contextProvider) GenerateResources(namespace string, dataList []map[st
 		}
 
 		for _, item := range items {
+			targetNamespace := namespace
+			if !cp.isNamespacedResource(item.GetAPIVersion(), item.GetKind()) {
+				// A non-empty namespace means the call is scoped to a single
+				// namespace, which for a namespaced policy is its own namespace
+				// (enforced in the generator lib). Cluster-scoped resources have
+				// no namespace, so generating one would escape that scope. Reject
+				// it instead of silently creating the resource cluster-wide.
+				if namespace != "" {
+					return fmt.Errorf("cross-scope generation denied: a policy scoped to namespace %q cannot generate cluster-scoped resource %s/%s", namespace, item.GetAPIVersion(), item.GetKind())
+				}
+				targetNamespace = ""
+			}
+
 			// In CLI evaluation mode, we do not create the resource in the cluster
 			// but just store it in the generated resources list.
 			if cp.cliEvaluation {
 				item.SetUID("")
 				item.SetManagedFields(nil)
 				item.SetAnnotations(nil)
-				item.SetNamespace(namespace)
+				item.SetNamespace(targetNamespace)
 				item.SetResourceVersion("")
 				item.SetCreationTimestamp(metav1.Time{})
 				cp.generatedResources = append(cp.generatedResources, item)
 				continue
 			}
 			cp.addGenerateLabels(item)
-			item.SetNamespace(namespace)
+			item.SetNamespace(targetNamespace)
 			item.SetResourceVersion("")
 			// check if the resource is already generated
 			_, err := cp.client.GetResource(
 				context.TODO(),
 				item.GetAPIVersion(),
 				item.GetKind(),
-				namespace,
+				targetNamespace,
 				item.GetName(),
 			)
 
@@ -199,7 +242,7 @@ func (cp *contextProvider) GenerateResources(namespace string, dataList []map[st
 						context.TODO(),
 						item.GetAPIVersion(),
 						item.GetKind(),
-						namespace,
+						targetNamespace,
 						item,
 						false,
 					)
@@ -269,6 +312,21 @@ func (cp *contextProvider) ToGVR(apiVersion, kind string) (*schema.GroupVersionR
 	}
 
 	return &r.Resource, nil
+}
+
+func (cp *contextProvider) isNamespacedResource(apiVersion, kind string) bool {
+	if cp.restMapper == nil || apiVersion == "" || kind == "" {
+		return true
+	}
+	groupVersion, err := schema.ParseGroupVersion(apiVersion)
+	if err != nil {
+		return true
+	}
+	r, err := cp.restMapper.RESTMapping(schema.GroupKind{Group: groupVersion.Group, Kind: kind}, groupVersion.Version)
+	if err != nil || r.Scope == nil {
+		return true
+	}
+	return r.Scope.Name() == meta.RESTScopeNameNamespace
 }
 
 func (cp *contextProvider) ClearGeneratedResources() {

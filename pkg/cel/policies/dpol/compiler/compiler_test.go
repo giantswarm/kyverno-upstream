@@ -3,8 +3,7 @@ package compiler
 import (
 	"testing"
 
-	"github.com/kyverno/kyverno/api/policies.kyverno.io/v1alpha1"
-	"github.com/kyverno/kyverno/api/policies.kyverno.io/v1beta1"
+	"github.com/kyverno/api/api/policies.kyverno.io/v1beta1"
 	"github.com/stretchr/testify/assert"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,7 +13,7 @@ func TestCompile(t *testing.T) {
 	tests := []struct {
 		name       string
 		policy     v1beta1.DeletingPolicyLike
-		exceptions []*v1alpha1.PolicyException
+		exceptions []*v1beta1.PolicyException
 		wantErr    bool
 	}{
 		{
@@ -109,15 +108,37 @@ func TestCompile(t *testing.T) {
 					Schedule: "* * * * *",
 				},
 			},
-			exceptions: []*v1alpha1.PolicyException{
+			exceptions: []*v1beta1.PolicyException{
 				{
 					ObjectMeta: metav1.ObjectMeta{Name: "exc1"},
-					Spec: v1alpha1.PolicyExceptionSpec{
+					Spec: v1beta1.PolicyExceptionSpec{
 						MatchConditions: []admissionv1.MatchCondition{
 							{
 								Name:       "exc-cond",
 								Expression: "object.metadata.namespace == 'default'",
 							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "condition references variable",
+			policy: &v1beta1.DeletingPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "cond-refs-var"},
+				Spec: v1beta1.DeletingPolicySpec{
+					Schedule: "* * * * *",
+					Variables: []admissionv1.Variable{
+						{
+							Name:       "targetEnv",
+							Expression: "'test'",
+						},
+					},
+					Conditions: []admissionv1.MatchCondition{
+						{
+							Name:       "check-env",
+							Expression: "variables.targetEnv == 'test'",
 						},
 					},
 				},
@@ -132,10 +153,10 @@ func TestCompile(t *testing.T) {
 					Schedule: "* * * * *",
 				},
 			},
-			exceptions: []*v1alpha1.PolicyException{
+			exceptions: []*v1beta1.PolicyException{
 				{
 					ObjectMeta: metav1.ObjectMeta{Name: "exc-bad"},
-					Spec: v1alpha1.PolicyExceptionSpec{
+					Spec: v1beta1.PolicyExceptionSpec{
 						MatchConditions: []admissionv1.MatchCondition{
 							{
 								Name:       "exc-bad-cond",

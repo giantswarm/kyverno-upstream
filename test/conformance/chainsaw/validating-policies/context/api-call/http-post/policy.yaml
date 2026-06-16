@@ -1,4 +1,4 @@
-apiVersion: policies.kyverno.io/v1alpha1
+apiVersion: policies.kyverno.io/v1beta1
 kind: ValidatingPolicy
 metadata:
   name: vpol-http-post
@@ -14,7 +14,7 @@ spec:
   variables:
     - name: response
       expression: >-
-       http.Post(
+       http.post(
         "http://test-api-service.default.svc.cluster.local/",
         {"labels": object.metadata.labels.app},{"Content-Type": "application/json"})
   validations:

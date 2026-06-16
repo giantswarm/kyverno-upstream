@@ -1,4 +1,4 @@
-apiVersion: policies.kyverno.io/v1alpha1
+apiVersion: policies.kyverno.io/v1beta1
 kind: ValidatingPolicy
 metadata:
   name: test-globalcontext-validatingpolicy-audit-report
@@ -18,7 +18,7 @@ spec:
   variables:
     - name: deployments
       expression: >-
-        globalContext.Get("all-deployments", "")
+        globalContext.get("all-deployments", "")
   validations:
     - expression: "0 == 1"
-      messageExpression: '"debug=" + string(variables.deployments.size())' 
+      messageExpression: '"debug=" + string(variables.deployments.size())'

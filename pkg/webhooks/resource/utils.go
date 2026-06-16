@@ -3,6 +3,7 @@ package resource
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/go-logr/logr"
 	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
@@ -25,23 +26,25 @@ func errorResponse(logger logr.Logger, uid types.UID, err error, message string)
 	return admissionutils.Response(uid, errors.New(message+": "+err.Error()))
 }
 
-func patchRequest(patches []byte, request admissionv1.AdmissionRequest, logger logr.Logger) admissionv1.AdmissionRequest {
-	patchedResource := processResourceWithPatches(patches, request.Object.Raw, logger)
+func patchRequest(patches []byte, request admissionv1.AdmissionRequest, logger logr.Logger) (admissionv1.AdmissionRequest, error) {
+	patchedResource, err := processResourceWithPatches(patches, request.Object.Raw, logger)
+	if err != nil {
+		return request, err
+	}
 	request.Object.Raw = patchedResource
-	return request
+	return request, nil
 }
 
-func processResourceWithPatches(patch []byte, resource []byte, log logr.Logger) []byte {
+func processResourceWithPatches(patch []byte, resource []byte, log logr.Logger) ([]byte, error) {
 	if patch == nil {
-		return resource
+		return resource, nil
 	}
-	resource, err := engineutils.ApplyPatchNew(resource, patch)
+	patchedResource, err := engineutils.ApplyPatchNew(resource, patch)
 	if err != nil {
-		log.Error(err, "failed to patch resource:", "patch", string(patch), "resource", string(resource))
-		return nil
+		return nil, fmt.Errorf("failed to apply patches: %w", err)
 	}
-	log.V(6).Info("", "patchedResource", string(resource))
-	return resource
+	log.V(6).Info("", "patchedResource", string(patchedResource))
+	return patchedResource, nil
 }
 
 func applyUpdateRequest(
@@ -112,7 +115,15 @@ func skipBackgroundRequests(policy kyvernov1.PolicyInterface, logger logr.Logger
 		if skipBackgroundRequests && (bgsaDesired == bgsaActual) {
 			continue
 		}
-		logger.V(4).Info("applying background rule", "rule", rule.Name, "skipBackgroundRequests", rule.SkipBackgroundRequests, "backgroundSaDesired", bgsaDesired, "backgroundSaActual", bgsaActual)
+		isBackgroundRequest := bgsaDesired == bgsaActual
+		logger.V(4).Info(
+			"including rule",
+			"rule", rule.Name,
+			"skipBackgroundRequests", rule.SkipBackgroundRequests,
+			"isBackgroundRequest", isBackgroundRequest,
+			"backgroundSaDesired", bgsaDesired,
+			"backgroundSaActual", bgsaActual,
+		)
 		policyNew.GetSpec().Rules = append(policyNew.GetSpec().Rules, *rule.DeepCopy())
 	}
 	if len(policyNew.GetSpec().Rules) == 0 {

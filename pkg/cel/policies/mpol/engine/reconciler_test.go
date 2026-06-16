@@ -6,10 +6,11 @@ import (
 	"sync"
 	"testing"
 
-	policiesv1alpha1 "github.com/kyverno/kyverno/api/policies.kyverno.io/v1alpha1"
+	policiesv1beta1 "github.com/kyverno/api/api/policies.kyverno.io/v1beta1"
 	"github.com/kyverno/kyverno/pkg/cel/policies/mpol/compiler"
+	mpolcompiler "github.com/kyverno/kyverno/pkg/cel/policies/mpol/compiler"
 	"github.com/stretchr/testify/assert"
-	admissionregistrationv1alpha1 "k8s.io/api/admissionregistration/v1alpha1"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -21,7 +22,7 @@ import (
 
 type fakeClient struct {
 	client.Client
-	policy *policiesv1alpha1.MutatingPolicy
+	policy *policiesv1beta1.MutatingPolicy
 	err    error
 }
 
@@ -29,7 +30,7 @@ func (f *fakeClient) Get(_ context.Context, _ client.ObjectKey, obj client.Objec
 	if f.err != nil {
 		return f.err
 	}
-	*obj.(*policiesv1alpha1.MutatingPolicy) = *f.policy
+	*obj.(*policiesv1beta1.MutatingPolicy) = *f.policy
 	return nil
 }
 
@@ -48,7 +49,7 @@ func TestReconcile(t *testing.T) {
 	//})
 
 	t.Run("successful reconciliation", func(t *testing.T) {
-		mp := &policiesv1alpha1.MutatingPolicy{
+		mp := &policiesv1beta1.MutatingPolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: "test-policy", Namespace: "default"},
 		}
 		rec := newReconciler(
@@ -84,12 +85,12 @@ func TestFetch(t *testing.T) {
 			policyMap: map[string][]Policy{
 				"ns1/policy1": {
 					{
-						Policy: policiesv1alpha1.MutatingPolicy{
+						Policy: &policiesv1beta1.MutatingPolicy{
 							ObjectMeta: metav1.ObjectMeta{Name: "policy1"},
 						},
 					},
 					{
-						Policy: policiesv1alpha1.MutatingPolicy{
+						Policy: &policiesv1beta1.MutatingPolicy{
 							ObjectMeta: metav1.ObjectMeta{Name: "policy2"},
 						},
 					},
@@ -103,11 +104,11 @@ func TestFetch(t *testing.T) {
 			policyMap: map[string][]Policy{
 				"ns1/policy1": {
 					{
-						Policy: policiesv1alpha1.MutatingPolicy{
+						Policy: &policiesv1beta1.MutatingPolicy{
 							ObjectMeta: metav1.ObjectMeta{Name: "policy1"},
-							Spec: policiesv1alpha1.MutatingPolicySpec{
-								EvaluationConfiguration: &policiesv1alpha1.MutatingPolicyEvaluationConfiguration{
-									MutateExistingConfiguration: &policiesv1alpha1.MutateExistingConfiguration{
+							Spec: policiesv1beta1.MutatingPolicySpec{
+								EvaluationConfiguration: &policiesv1beta1.MutatingPolicyEvaluationConfiguration{
+									MutateExistingConfiguration: &policiesv1beta1.MutateExistingConfiguration{
 										Enabled: &trueBool,
 									},
 								},
@@ -115,11 +116,11 @@ func TestFetch(t *testing.T) {
 						},
 					},
 					{
-						Policy: policiesv1alpha1.MutatingPolicy{
+						Policy: &policiesv1beta1.MutatingPolicy{
 							ObjectMeta: metav1.ObjectMeta{Name: "policy2"},
-							Spec: policiesv1alpha1.MutatingPolicySpec{
-								EvaluationConfiguration: &policiesv1alpha1.MutatingPolicyEvaluationConfiguration{
-									MutateExistingConfiguration: &policiesv1alpha1.MutateExistingConfiguration{
+							Spec: policiesv1beta1.MutatingPolicySpec{
+								EvaluationConfiguration: &policiesv1beta1.MutatingPolicyEvaluationConfiguration{
+									MutateExistingConfiguration: &policiesv1beta1.MutateExistingConfiguration{
 										Enabled: &falseBool,
 									},
 								},
@@ -136,11 +137,11 @@ func TestFetch(t *testing.T) {
 			policyMap: map[string][]Policy{
 				"ns1/policy2": {
 					{
-						Policy: policiesv1alpha1.MutatingPolicy{
+						Policy: &policiesv1beta1.MutatingPolicy{
 							ObjectMeta: metav1.ObjectMeta{Name: "policy2"},
-							Spec: policiesv1alpha1.MutatingPolicySpec{
-								EvaluationConfiguration: &policiesv1alpha1.MutatingPolicyEvaluationConfiguration{
-									MutateExistingConfiguration: &policiesv1alpha1.MutateExistingConfiguration{
+							Spec: policiesv1beta1.MutatingPolicySpec{
+								EvaluationConfiguration: &policiesv1beta1.MutatingPolicyEvaluationConfiguration{
+									MutateExistingConfiguration: &policiesv1beta1.MutateExistingConfiguration{
 										Enabled: &falseBool,
 									},
 								},
@@ -160,9 +161,7 @@ func TestFetch(t *testing.T) {
 				lock:     &sync.RWMutex{},
 			}
 
-			got, err := r.Fetch(context.Background(), tt.mutateExisting)
-
-			assert.NoError(t, err)
+			got := r.Fetch(context.Background(), tt.mutateExisting)
 
 			var gotNames []string
 			for _, p := range got {
@@ -194,16 +193,16 @@ func TestMatchesMutateExisting(t *testing.T) {
 			policies: map[string][]Policy{
 				"test/policy1": {
 					{
-						Policy: policiesv1alpha1.MutatingPolicy{
+						Policy: &policiesv1beta1.MutatingPolicy{
 							ObjectMeta: metav1.ObjectMeta{Name: "policy1"},
-							Spec: policiesv1alpha1.MutatingPolicySpec{
-								EvaluationConfiguration: &policiesv1alpha1.MutatingPolicyEvaluationConfiguration{
-									MutateExistingConfiguration: &policiesv1alpha1.MutateExistingConfiguration{
+							Spec: policiesv1beta1.MutatingPolicySpec{
+								EvaluationConfiguration: &policiesv1beta1.MutatingPolicyEvaluationConfiguration{
+									MutateExistingConfiguration: &policiesv1beta1.MutateExistingConfiguration{
 										Enabled: &trueBool,
 									},
 								},
-								MatchConstraints: &admissionregistrationv1alpha1.MatchResources{}, // empty constraints should match
-								MatchConditions:  nil,                                             // no conditions
+								MatchConstraints: &admissionregistrationv1.MatchResources{}, // empty constraints should match
+								MatchConditions:  nil,                                       // no conditions
 							},
 						},
 						CompiledPolicy: &compiler.Policy{},
@@ -217,18 +216,18 @@ func TestMatchesMutateExisting(t *testing.T) {
 			policies: map[string][]Policy{
 				"test/policy2": {
 					{
-						Policy: policiesv1alpha1.MutatingPolicy{
+						Policy: &policiesv1beta1.MutatingPolicy{
 							ObjectMeta: metav1.ObjectMeta{Name: "policy2"},
-							Spec: policiesv1alpha1.MutatingPolicySpec{
-								EvaluationConfiguration: &policiesv1alpha1.MutatingPolicyEvaluationConfiguration{
-									MutateExistingConfiguration: &policiesv1alpha1.MutateExistingConfiguration{
+							Spec: policiesv1beta1.MutatingPolicySpec{
+								EvaluationConfiguration: &policiesv1beta1.MutatingPolicyEvaluationConfiguration{
+									MutateExistingConfiguration: &policiesv1beta1.MutateExistingConfiguration{
 										Enabled: &trueBool,
 									},
 								},
-								MatchConstraints: &admissionregistrationv1alpha1.MatchResources{},
-								MatchConditions: []admissionregistrationv1alpha1.MatchCondition{
+								MatchConstraints: &admissionregistrationv1.MatchResources{},
+								MatchConditions: []admissionregistrationv1.MatchCondition{
 									{
-										Expression: `request.object.metadata.labels.env == "dev"`,
+										Expression: `object.metadata.labels.env == "dev"`,
 									},
 								},
 							},
@@ -244,7 +243,7 @@ func TestMatchesMutateExisting(t *testing.T) {
 			policies: map[string][]Policy{
 				"test/policy3": {
 					{
-						Policy: policiesv1alpha1.MutatingPolicy{
+						Policy: &policiesv1beta1.MutatingPolicy{
 							ObjectMeta: metav1.ObjectMeta{Name: "policy3"},
 						},
 					},
@@ -254,15 +253,23 @@ func TestMatchesMutateExisting(t *testing.T) {
 		},
 	}
 
+	compiler := mpolcompiler.NewCompiler()
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			for k, l := range tt.policies {
+				for i, p := range l {
+					c, _ := compiler.Compile(p.Policy, nil)
+					tt.policies[k][i].CompiledPolicy = c
+				}
+			}
 			r := &reconciler{
 				lock:     &sync.RWMutex{},
 				policies: tt.policies,
 			}
 			attrs := &mockAttributes{}
 			namespace := &corev1.Namespace{}
-			got := r.MatchesMutateExisting(context.TODO(), attrs, namespace)
+			got := r.MatchesMutateExisting(context.TODO(), attrs, nil, namespace)
 			assert.ElementsMatch(t, tt.expectedNames, got)
 		})
 	}

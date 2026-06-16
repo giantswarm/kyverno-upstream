@@ -9,10 +9,13 @@ import (
 	"strings"
 
 	json_patch "github.com/evanphx/json-patch/v5"
+	"github.com/go-git/go-billy/v5"
+	"github.com/google/cel-go/common/types"
+	"github.com/google/cel-go/common/types/ref"
+	policieskyvernoio "github.com/kyverno/api/api/policies.kyverno.io"
+	policiesv1beta1 "github.com/kyverno/api/api/policies.kyverno.io/v1beta1"
 	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
 	kyvernov2 "github.com/kyverno/kyverno/api/kyverno/v2"
-	policiesv1alpha1 "github.com/kyverno/kyverno/api/policies.kyverno.io/v1alpha1"
-	policiesv1beta1 "github.com/kyverno/kyverno/api/policies.kyverno.io/v1beta1"
 	"github.com/kyverno/kyverno/cmd/cli/kubectl-kyverno/apis/v1alpha1"
 	"github.com/kyverno/kyverno/cmd/cli/kubectl-kyverno/data"
 	"github.com/kyverno/kyverno/cmd/cli/kubectl-kyverno/log"
@@ -20,7 +23,10 @@ import (
 	"github.com/kyverno/kyverno/cmd/cli/kubectl-kyverno/utils/common"
 	"github.com/kyverno/kyverno/cmd/cli/kubectl-kyverno/variables"
 	"github.com/kyverno/kyverno/pkg/admissionpolicy"
+	mpol "github.com/kyverno/kyverno/pkg/background/mpol"
+	"github.com/kyverno/kyverno/pkg/cel/compiler"
 	celengine "github.com/kyverno/kyverno/pkg/cel/engine"
+	"github.com/kyverno/kyverno/pkg/cel/libs"
 	"github.com/kyverno/kyverno/pkg/cel/matching"
 	gpolcompiler "github.com/kyverno/kyverno/pkg/cel/policies/gpol/compiler"
 	gpolengine "github.com/kyverno/kyverno/pkg/cel/policies/gpol/engine"
@@ -38,19 +44,24 @@ import (
 	"github.com/kyverno/kyverno/pkg/engine/mutate/patch"
 	"github.com/kyverno/kyverno/pkg/engine/policycontext"
 	"github.com/kyverno/kyverno/pkg/exceptions"
-	"github.com/kyverno/kyverno/pkg/imageverifycache"
+	imageverifycache "github.com/kyverno/kyverno/pkg/image/verification/cache"
 	"github.com/kyverno/kyverno/pkg/registryclient"
 	jsonutils "github.com/kyverno/kyverno/pkg/utils/json"
 	utils "github.com/kyverno/kyverno/pkg/utils/restmapper"
+	celutils "github.com/kyverno/sdk/extensions/cel/utils"
 	"gomodules.xyz/jsonpatch/v2"
 	yamlv2 "gopkg.in/yaml.v2"
 	admissionv1 "k8s.io/api/admission/v1"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	admissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apiserver/pkg/admission"
+	"k8s.io/apiserver/pkg/cel/lazy"
 	"k8s.io/client-go/openapi"
 	"sigs.k8s.io/kubectl-validate/pkg/openapiclient"
 )
@@ -62,20 +73,24 @@ type PolicyProcessor struct {
 	ValidatingAdmissionPolicyBindings []admissionregistrationv1.ValidatingAdmissionPolicyBinding
 	MutatingAdmissionPolicies         []admissionregistrationv1beta1.MutatingAdmissionPolicy
 	MutatingAdmissionPolicyBindings   []admissionregistrationv1beta1.MutatingAdmissionPolicyBinding
-	ValidatingPolicies                []policiesv1beta1.ValidatingPolicy
-	NamespacedValidatingPolicies      []policiesv1beta1.NamespacedValidatingPolicy
-	GeneratingPolicies                []policiesv1alpha1.GeneratingPolicy
-	MutatingPolicies                  []policiesv1alpha1.MutatingPolicy
+	ValidatingPolicies                []policiesv1beta1.ValidatingPolicyLike
+	EnvoyPolicies                     []*policiesv1beta1.ValidatingPolicy
+	HTTPPolicies                      []*policiesv1beta1.ValidatingPolicy
+	GeneratingPolicies                []policiesv1beta1.GeneratingPolicyLike
+	MutatingPolicies                  []policiesv1beta1.MutatingPolicyLike
+	TargetResources                   []*unstructured.Unstructured
 	Resource                          unstructured.Unstructured
 	JsonPayload                       unstructured.Unstructured
 	PolicyExceptions                  []*kyvernov2.PolicyException
-	CELExceptions                     []*policiesv1alpha1.PolicyException
+	CELExceptions                     []*policiesv1beta1.PolicyException
 	MutateLogPath                     string
 	MutateLogPathIsDir                bool
 	Variables                         *variables.Variables
 	ParameterResources                []runtime.Object
 	// TODO
+	ContextFs                 billy.Filesystem
 	ContextPath               string
+	GlobalContextEntries      map[string]interface{}
 	Cluster                   bool
 	UserInfo                  *kyvernov2.RequestInfo
 	PolicyReport              bool
@@ -88,7 +103,10 @@ type PolicyProcessor struct {
 	AuditWarn                 bool
 	Subresources              []v1alpha1.Subresource
 	Out                       io.Writer
+	CrdPath                   string
 	NamespaceCache            map[string]*unstructured.Unstructured
+	ConfigMapResolver         engineapi.ConfigmapResolver
+	RESTMapper                meta.RESTMapper
 }
 
 func (p *PolicyProcessor) ApplyPoliciesOnResource() ([]engineapi.EngineResponse, error) {
@@ -96,6 +114,9 @@ func (p *PolicyProcessor) ApplyPoliciesOnResource() ([]engineapi.EngineResponse,
 	jp := jmespath.New(cfg)
 	resource := p.Resource
 	namespaceLabels := p.NamespaceSelectorMap[resource.GetNamespace()]
+	if p.NamespaceCache == nil {
+		p.NamespaceCache = make(map[string]*unstructured.Unstructured)
+	}
 	policyExceptionLister := &policyExceptionLister{
 		exceptions: p.PolicyExceptions,
 	}
@@ -108,13 +129,18 @@ func (p *PolicyProcessor) ApplyPoliciesOnResource() ([]engineapi.EngineResponse,
 		rclient = registryclient.NewOrDie()
 	}
 	isCluster := false
+	if p.CrdPath != "" {
+		if err := p.loadCrds(); err != nil {
+			return nil, err
+		}
+	}
 	eng := engine.NewEngine(
 		cfg,
 		jmespath.New(cfg),
 		client,
 		factories.DefaultRegistryClientFactory(adapters.RegistryClient(rclient), nil),
 		imageverifycache.DisabledImageVerifyCache(),
-		store.ContextLoaderFactory(p.Store, nil),
+		store.ContextLoaderFactory(p.Store, p.ConfigMapResolver),
 		exceptions.New(policyExceptionLister),
 		&isCluster,
 	)
@@ -232,15 +258,19 @@ func (p *PolicyProcessor) ApplyPoliciesOnResource() ([]engineapi.EngineResponse,
 		resource = validateResponse.PatchedResource
 	}
 
-	restMapper, err := utils.GetRESTMapper(p.Client, !p.Cluster)
-	if err != nil {
-		return nil, err
+	restMapper := p.RESTMapper
+	if restMapper == nil {
+		var err error
+		restMapper, err = utils.GetRESTMapper(p.Client)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// Mutate Admission Policies
 	if len(p.MutatingAdmissionPolicies) != 0 {
 		mapping, err := restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 		if err != nil {
-			return nil, fmt.Errorf("failed to map gvk to gvr %s (%v)\n", gvk, err)
+			return nil, fmt.Errorf("failed to map gvk to gvr %s: %w", gvk, err)
 		} else {
 			var user authenticationv1.UserInfo
 			if p.UserInfo != nil {
@@ -276,12 +306,13 @@ func (p *PolicyProcessor) ApplyPoliciesOnResource() ([]engineapi.EngineResponse,
 	}
 	// MutatingPolicies
 	if len(p.MutatingPolicies) != 0 {
-		provider, err := mpolengine.NewProvider(mpolcompiler.NewCompiler(), p.MutatingPolicies, p.CELExceptions)
+		compiler := mpolcompiler.NewCompiler()
+		contextProvider, err := NewContextProvider(p.Client, restMapper, p.ContextFs, p.ContextPath, true, !p.Cluster, p.GlobalContextEntries, p.Store.GetHTTPMockIndex())
 		if err != nil {
 			return nil, err
 		}
 
-		contextProvider, err := NewContextProvider(p.Client, restMapper, p.ContextPath, true, !p.Cluster)
+		provider, err := mpolengine.NewProvider(compiler, p.MutatingPolicies, p.CELExceptions, contextProvider)
 		if err != nil {
 			return nil, err
 		}
@@ -291,7 +322,22 @@ func (p *PolicyProcessor) ApplyPoliciesOnResource() ([]engineapi.EngineResponse,
 			eng := mpolengine.NewEngine(provider, p.Variables.Namespace, matching.NewMatcher(), tcm, contextProvider)
 			mapping, err := restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 			if err != nil {
-				return nil, fmt.Errorf("failed to map gvk to gvr %s (%v)\n", gvk, err)
+				if !p.Cluster {
+					mapping = &meta.RESTMapping{
+						Resource: schema.GroupVersionResource{
+							Group:   gvk.Group,
+							Version: gvk.Version,
+						},
+					}
+
+					newR, err := p.resolveResource(gvk.Kind)
+					if err != nil {
+						return nil, fmt.Errorf("failed to map gvk to gvr %s: %w", gvk, err)
+					}
+					mapping.Resource.Resource = newR
+				} else {
+					return nil, fmt.Errorf("failed to map gvk to gvr %s: %w", gvk, err)
+				}
 			}
 			gvr := mapping.Resource
 			var user authenticationv1.UserInfo
@@ -318,6 +364,9 @@ func (p *PolicyProcessor) ApplyPoliciesOnResource() ([]engineapi.EngineResponse,
 				return nil, fmt.Errorf("failed to apply mutating policies on resource %s (%w)", resource.GetName(), err)
 			}
 			for _, r := range reps.Policies {
+				if len(r.Rules) == 0 && hasSelector(r.Policy.GetSpec().MatchConstraints) {
+					continue
+				}
 				patched := *reps.Resource
 				if reps.PatchedResource != nil {
 					patched = *reps.PatchedResource
@@ -330,7 +379,7 @@ func (p *PolicyProcessor) ApplyPoliciesOnResource() ([]engineapi.EngineResponse,
 						Rules: r.Rules,
 					},
 				}
-				response = response.WithPolicy(engineapi.NewMutatingPolicy(r.Policy))
+				response = response.WithPolicy(engineapi.NewMutatingPolicyFromLike(r.Policy))
 				p.Rc.addMutateResponse(response)
 
 				err = p.processMutateEngineResponse(response, resPath)
@@ -341,6 +390,78 @@ func (p *PolicyProcessor) ApplyPoliciesOnResource() ([]engineapi.EngineResponse,
 				responses = append(responses, response)
 				resource = response.PatchedResource
 			}
+			// mutateExisting MutatingPolicies - process target resources
+			if len(p.TargetResources) > 0 {
+				// Create engine with nil matcher — targets are filtered by targetMatchConstraints
+				// (via label selectors and CEL expressions) rather than by MatchConstraints which matches triggers
+				mutExistEng := mpolengine.NewEngine(provider, p.Variables.Namespace, nil, tcm, contextProvider)
+				targetMatcher := matching.NewMatcher()
+				// Register target resources with FakeContextProvider so CEL resource.List()/resource.Get() can find them
+				if fakeCtx, ok := contextProvider.(*libs.FakeContextProvider); ok {
+					for _, target := range p.TargetResources {
+						tGVK := target.GroupVersionKind()
+						tMapping, err := restMapper.RESTMapping(tGVK.GroupKind(), tGVK.Version)
+						if err != nil {
+							continue
+						}
+						_ = fakeCtx.AddResource(tMapping.Resource, target)
+					}
+				}
+				celTargets, err := discoverCELTargets(provider, contextProvider, &resource)
+				if err != nil {
+					return nil, fmt.Errorf("failed to discover CEL targets: %w", err)
+				}
+				for _, target := range p.TargetResources {
+					targetGVK := target.GroupVersionKind()
+					targetMapping, err := restMapper.RESTMapping(targetGVK.GroupKind(), targetGVK.Version)
+					if err != nil {
+						return nil, fmt.Errorf("failed to map target gvk to gvr %s: %w", targetGVK, err)
+					}
+					targetGVR := targetMapping.Resource
+					attr := admission.NewAttributesRecord(
+						target,
+						nil,
+						targetGVK,
+						target.GetNamespace(),
+						target.GetName(),
+						targetGVR,
+						"",
+						admission.Operation(""),
+						nil,
+						false,
+						nil,
+					)
+					evalResponse, err := mutExistEng.Evaluate(context.TODO(), attr, request.Request, targetMatchPredicate(targetMatcher, attr, celTargets))
+					if err != nil {
+						return nil, fmt.Errorf("failed to evaluate mutateExisting policies on target %s (%w)", target.GetName(), err)
+					}
+					for _, r := range evalResponse.Policies {
+						if len(r.Rules) == 0 {
+							continue
+						}
+						patched := *evalResponse.Resource
+						if evalResponse.PatchedResource != nil {
+							patched = *evalResponse.PatchedResource
+						}
+						rules := make([]engineapi.RuleResponse, 0, len(r.Rules))
+						for _, rule := range r.Rules {
+							if rule.Status() == engineapi.RuleStatusPass {
+								rules = append(rules, *rule.WithPatchedTarget(&patched, metav1.GroupVersionResource(targetGVR), ""))
+							} else {
+								rules = append(rules, rule)
+							}
+						}
+						resp := engineapi.EngineResponse{
+							Resource: resource,
+							PolicyResponse: engineapi.PolicyResponse{
+								Rules: rules,
+							},
+						}
+						resp = resp.WithPolicy(engineapi.NewMutatingPolicyFromLike(r.Policy))
+						responses = append(responses, resp)
+					}
+				}
+			}
 		}
 	}
 	// validating admission policies
@@ -349,7 +470,7 @@ func (p *PolicyProcessor) ApplyPoliciesOnResource() ([]engineapi.EngineResponse,
 		// map gvk to gvr
 		mapping, err := restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 		if err != nil {
-			return nil, fmt.Errorf("failed to map gvk to gvr %s (%v)\n", gvk, err)
+			return nil, fmt.Errorf("failed to map gvk to gvr %s: %w", gvk, err)
 		}
 		gvr := mapping.Resource
 		var user authenticationv1.UserInfo
@@ -372,113 +493,197 @@ func (p *PolicyProcessor) ApplyPoliciesOnResource() ([]engineapi.EngineResponse,
 		}
 	}
 	// validating policies
-	if len(p.ValidatingPolicies) != 0 || len(p.NamespacedValidatingPolicies) != 0 {
+	if len(p.ValidatingPolicies) != 0 {
 		ctx := context.TODO()
 		compiler := vpolcompiler.NewCompiler()
-		policies := make([]policiesv1beta1.ValidatingPolicyLike, 0, len(p.ValidatingPolicies))
+		// Separate policies by evaluation mode to route them correctly.
+		// JSON-mode policies evaluate against raw JSON and must not go through the
+		// Kubernetes admission path (which requires GVK/GVR and admission attributes).
+		// Kubernetes-mode policies (the default) require admission attributes and must
+		// not be sent through the JSON path (which would cause a nil pointer dereference).
+		jsonPolicies := make([]policiesv1beta1.ValidatingPolicyLike, 0)
+		k8sPolicies := make([]policiesv1beta1.ValidatingPolicyLike, 0)
 		for i := range p.ValidatingPolicies {
-			policies = append(policies, &p.ValidatingPolicies[i])
+			pol := p.ValidatingPolicies[i]
+			if pol.GetValidatingPolicySpec().EvaluationMode() == policieskyvernoio.EvaluationModeJSON {
+				jsonPolicies = append(jsonPolicies, pol)
+			} else {
+				k8sPolicies = append(k8sPolicies, pol)
+			}
 		}
-		for i := range p.NamespacedValidatingPolicies {
-			policies = append(policies, &p.NamespacedValidatingPolicies[i])
-		}
-		provider, err := vpolengine.NewProvider(compiler, policies, p.CELExceptions)
-		if err != nil {
-			return nil, err
-		}
-		contextProvider, err := NewContextProvider(p.Client, restMapper, p.ContextPath, true, !p.Cluster)
+		contextProvider, err := NewContextProvider(p.Client, restMapper, p.ContextFs, p.ContextPath, true, !p.Cluster, p.GlobalContextEntries, p.Store.GetHTTPMockIndex())
 		if err != nil {
 			return nil, err
 		}
 		if resource.Object != nil {
-			eng := vpolengine.NewEngine(provider, p.Variables.Namespace, matching.NewMatcher())
-			// map gvk to gvr
-			mapping, err := restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
-			if err != nil {
-				return nil, fmt.Errorf("failed to map gvk to gvr %s (%v)\n", gvk, err)
-			}
-			gvr := mapping.Resource
-			var user authenticationv1.UserInfo
-			if p.UserInfo != nil {
-				user = p.UserInfo.AdmissionUserInfo
-			}
-			// create engine request
-			request := celengine.Request(
-				contextProvider,
-				gvk,
-				gvr,
-				// TODO: how to manage subresource ?
-				"",
-				resource.GetName(),
-				resource.GetNamespace(),
-				// TODO: how to manage other operations ?
-				admissionv1.Create,
-				user,
-				&resource,
-				nil,
-				false,
-				nil,
-			)
-			reps, err := eng.Handle(ctx, request, nil)
-			if err != nil {
-				return nil, fmt.Errorf("failed to apply validating policies on resource %s (%w)", resource.GetName(), err)
-			}
-			for _, r := range reps.Policies {
-				response := engineapi.EngineResponse{
-					Resource: *reps.Resource,
-					PolicyResponse: engineapi.PolicyResponse{
-						Rules: r.Rules,
-					},
+			// Evaluate Kubernetes-mode policies via the admission path
+			if len(k8sPolicies) > 0 {
+				provider, err := vpolengine.NewProvider(compiler, k8sPolicies, p.CELExceptions)
+				if err != nil {
+					return nil, err
 				}
-				response = response.WithPolicy(engineapi.NewValidatingPolicyFromLike(r.Policy))
-				p.Rc.AddValidatingPolicyResponse(response)
-				responses = append(responses, response)
+				eng := vpolengine.NewEngine(provider, p.Variables.Namespace, matching.NewMatcher())
+				// map gvk to gvr
+				mapping, err := restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+				if err != nil {
+					if !p.Cluster {
+						mapping = &meta.RESTMapping{
+							Resource: schema.GroupVersionResource{
+								Group:   gvk.Group,
+								Version: gvk.Version,
+							},
+						}
+
+						newR, err := p.resolveResource(gvk.Kind)
+						if err != nil {
+							return nil, fmt.Errorf("failed to map gvk to gvr %s: %w", gvk, err)
+						}
+						mapping.Resource.Resource = newR
+					} else {
+						return nil, fmt.Errorf("failed to map gvk to gvr %s: %w", gvk, err)
+					}
+				}
+
+				gvr := mapping.Resource
+				var user authenticationv1.UserInfo
+				if p.UserInfo != nil {
+					user = p.UserInfo.AdmissionUserInfo
+				}
+				// create engine request
+				request := celengine.Request(
+					contextProvider,
+					gvk,
+					gvr,
+					// TODO: how to manage subresource ?
+					"",
+					resource.GetName(),
+					resource.GetNamespace(),
+					// TODO: how to manage other operations ?
+					admissionv1.Create,
+					user,
+					&resource,
+					nil,
+					false,
+					nil,
+				)
+				reps, err := eng.Handle(ctx, request, nil)
+				if err != nil {
+					return nil, fmt.Errorf("failed to apply validating policies on resource %s (%w)", resource.GetName(), err)
+				}
+				for _, r := range reps.Policies {
+					if len(r.Rules) == 0 && hasSelector(r.Policy.GetSpec().MatchConstraints) {
+						continue
+					}
+					response := engineapi.EngineResponse{
+						Resource: *reps.Resource,
+						PolicyResponse: engineapi.PolicyResponse{
+							Rules: r.Rules,
+						},
+					}
+					response = response.WithPolicy(engineapi.NewValidatingPolicyFromLike(r.Policy))
+					p.Rc.AddValidatingPolicyResponse(response)
+					responses = append(responses, response)
+				}
+			}
+			// Also evaluate JSON-mode policies against the K8s resource as raw JSON
+			if len(jsonPolicies) > 0 {
+				provider, err := vpolengine.NewProvider(compiler, jsonPolicies, p.CELExceptions)
+				if err != nil {
+					return nil, err
+				}
+				eng := vpolengine.NewEngine(provider, nil, nil)
+				request := celengine.RequestFromJSON(contextProvider, &resource)
+				reps, err := eng.Handle(ctx, request, nil)
+				if err != nil {
+					return nil, fmt.Errorf("failed to apply JSON-mode validating policies on resource %s (%w)", resource.GetName(), err)
+				}
+				for _, r := range reps.Policies {
+					if len(r.Rules) == 0 {
+						continue
+					}
+					response := engineapi.EngineResponse{
+						Resource: *reps.Resource,
+						PolicyResponse: engineapi.PolicyResponse{
+							Rules: r.Rules,
+						},
+					}
+					response = response.WithPolicy(engineapi.NewValidatingPolicyFromLike(r.Policy))
+					p.Rc.AddValidatingPolicyResponse(response)
+					responses = append(responses, response)
+				}
 			}
 		}
 		if p.JsonPayload.Object != nil {
-			eng := vpolengine.NewEngine(provider, nil, nil)
-			request := celengine.RequestFromJSON(contextProvider, &unstructured.Unstructured{Object: p.JsonPayload.Object})
-			reps, err := eng.Handle(ctx, request, nil)
-			if err != nil {
-				return nil, err
+			if len(k8sPolicies) > 0 {
+				log.Log.V(1).Info("skipping Kubernetes-mode validating policies for JSON payload (set spec.evaluation.mode to JSON for non-Kubernetes payloads)",
+					"skippedPolicies", len(k8sPolicies))
 			}
-			for _, r := range reps.Policies {
-				response := engineapi.EngineResponse{
-					Resource: *reps.Resource,
-					PolicyResponse: engineapi.PolicyResponse{
-						Rules: r.Rules,
-					},
+			if len(jsonPolicies) > 0 {
+				provider, err := vpolengine.NewProvider(compiler, jsonPolicies, p.CELExceptions)
+				if err != nil {
+					return nil, err
 				}
-				response = response.WithPolicy(engineapi.NewValidatingPolicyFromLike(r.Policy))
-				p.Rc.AddValidatingPolicyResponse(response)
-				responses = append(responses, response)
+				eng := vpolengine.NewEngine(provider, nil, nil)
+				request := celengine.RequestFromJSON(contextProvider, &unstructured.Unstructured{Object: p.JsonPayload.Object})
+				reps, err := eng.Handle(ctx, request, nil)
+				if err != nil {
+					return nil, err
+				}
+				for _, r := range reps.Policies {
+					response := engineapi.EngineResponse{
+						Resource: *reps.Resource,
+						PolicyResponse: engineapi.PolicyResponse{
+							Rules: r.Rules,
+						},
+					}
+					response = response.WithPolicy(engineapi.NewValidatingPolicyFromLike(r.Policy))
+					p.Rc.AddValidatingPolicyResponse(response)
+					responses = append(responses, response)
+				}
 			}
 		}
 	}
 	// generating policies
 	if len(p.GeneratingPolicies) != 0 {
+		// initialize the context provider before compiling to make it globally available
+		contextProvider, err := NewContextProvider(p.Client, restMapper, p.ContextFs, p.ContextPath, true, !p.Cluster, p.GlobalContextEntries, p.Store.GetHTTPMockIndex())
+		if err != nil {
+			return nil, err
+		}
+
 		compiler := gpolcompiler.NewCompiler()
 		compiledPolicies := make([]gpolengine.Policy, 0, len(p.GeneratingPolicies))
 		for _, pol := range p.GeneratingPolicies {
-			compiled, errs := compiler.Compile(&pol, p.CELExceptions)
+			compiled, errs := compiler.Compile(pol, p.CELExceptions)
 			if len(errs) > 0 {
 				return nil, fmt.Errorf("failed to compile policy %s (%w)", pol.GetName(), errs.ToAggregate())
 			}
 			compiledPolicies = append(compiledPolicies, gpolengine.Policy{
-				Policy:         pol,
+				Policy:         engineapi.NewGeneratingPolicyFromLike(pol).AsGeneratingPolicy(),
 				CompiledPolicy: compiled,
 			})
-		}
-		contextProvider, err := NewContextProvider(p.Client, restMapper, p.ContextPath, true, !p.Cluster)
-		if err != nil {
-			return nil, err
 		}
 		if resource.Object != nil {
 			engine := gpolengine.NewEngine(p.Variables.Namespace, matching.NewMatcher())
 			// map gvk to gvr
 			mapping, err := restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 			if err != nil {
-				return nil, fmt.Errorf("failed to map gvk to gvr %s (%v)\n", gvk, err)
+				if !p.Cluster {
+					mapping = &meta.RESTMapping{
+						Resource: schema.GroupVersionResource{
+							Group:   gvk.Group,
+							Version: gvk.Version,
+						},
+					}
+
+					newR, err := p.resolveResource(gvk.Kind)
+					if err != nil {
+						return nil, fmt.Errorf("failed to map gvk to gvr %s: %w", gvk, err)
+					}
+					mapping.Resource.Resource = newR
+				} else {
+					return nil, fmt.Errorf("failed to map gvk to gvr %s: %w", gvk, err)
+				}
 			}
 			gvr := mapping.Resource
 			var user authenticationv1.UserInfo
@@ -515,7 +720,7 @@ func (p *PolicyProcessor) ApplyPoliciesOnResource() ([]engineapi.EngineResponse,
 							Rules: []engineapi.RuleResponse{*res.Result},
 						},
 					}
-					generateResponse = generateResponse.WithPolicy(engineapi.NewGeneratingPolicy(&res.Policy))
+					generateResponse = generateResponse.WithPolicy(engineapi.NewGeneratingPolicyFromLike(res.Policy))
 					if err := p.processGenerateResponse(generateResponse, resPath); err != nil {
 						return responses, err
 					}
@@ -568,7 +773,8 @@ func (p *PolicyProcessor) makePolicyContext(
 		kindOnwhichPolicyIsApplied := common.GetKindsFromPolicy(p.Out, policy, p.Variables.Subresources(), p.Client)
 		vals, err := p.Variables.ComputeVariables(p.Store, policy.GetName(), resource.GetName(), resource.GetKind(), kindOnwhichPolicyIsApplied /*matches...*/)
 		if err != nil {
-			return nil, fmt.Errorf("policy `%s` have variables. pass the values for the variables for resource `%s` using set/values_file flag (%w)",
+			return nil, fmt.Errorf(
+				"policy `%s` has variables. pass the values for the variables for resource `%s` using set/values_file flag (%w)",
 				policy.GetName(),
 				resource.GetName(),
 				err,
@@ -583,9 +789,17 @@ func (p *PolicyProcessor) makePolicyContext(
 	case "UPDATE":
 		operation = kyvernov1.Update
 	}
+
+	var newResource unstructured.Unstructured
+	if operation == kyvernov1.Delete {
+		newResource = unstructured.Unstructured{}
+	} else {
+		newResource = resource
+	}
+
 	policyContext, err := engine.NewPolicyContext(
 		jp,
-		resource,
+		newResource,
 		operation,
 		p.UserInfo,
 		cfg,
@@ -670,6 +884,7 @@ func (p *PolicyProcessor) makePolicyContext(
 		if err != nil {
 			return nil, err
 		}
+		policyContext = policyContext.WithNewResource(unstructured.Unstructured{})
 		if ret == nil {
 			policyContext = policyContext.WithOldResource(unstructured.Unstructured{})
 		} else {
@@ -754,18 +969,17 @@ func (p *PolicyProcessor) printOutput(resource interface{}, response engineapi.E
 		filename = response.Policy().GetName() + "-generated"
 	}
 
-	file, err = os.OpenFile(filepath.Join(mutateLogPath, filename+".yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) // #nosec G304
-	if err != nil {
-		return err
-	}
-
-	if !p.MutateLogPathIsDir {
-		// truncation for the case when mutateLogPath is a file (not a directory) is handled under pkg/kyverno/apply/test_command.go
-		f, err := os.OpenFile(mutateLogPath, os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304
+	if p.MutateLogPathIsDir {
+		file, err = os.OpenFile(filepath.Join(mutateLogPath, filename+".yaml"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) // #nosec G304
 		if err != nil {
 			return err
 		}
-		file = f
+	} else {
+		// truncation for the case when mutateLogPath is a file (not a directory) is handled under pkg/kyverno/apply/test_command.go
+		file, err = os.OpenFile(mutateLogPath, os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304
+		if err != nil {
+			return err
+		}
 	}
 	if _, err := file.Write([]byte(string(yamlEncodedResource) + "\n---\n\n")); err != nil {
 		return err
@@ -786,14 +1000,267 @@ func (p *PolicyProcessor) openAPI() openapi.Client {
 	clients := make([]openapi.Client, 0)
 
 	if p.Cluster {
-		return p.Client.GetKubeClient().Discovery().OpenAPIV3()
+		// Try to get OpenAPI from the cluster's discovery client.
+		// Prepend it to the composite so --crd-path and built-in schemas
+		// remain reachable even when cluster discovery succeeds.
+		// In CLI test mode the discovery client is a fake that panics
+		// on OpenAPIV3(), so we recover and skip it gracefully.
+		if client := p.tryClusterOpenAPI(); client != nil {
+			clients = append(clients, client)
+		}
+	}
+
+	if p.CrdPath != "" {
+		absPath := getAbsPath(p.CrdPath)
+		diskCrds := os.DirFS(absPath)
+		clients = append(clients, openapiclient.NewLocalCRDFiles(diskCrds))
+	} else {
+		if crds, err := data.Crds(); err == nil {
+			clients = append(clients, openapiclient.NewLocalSchemaFiles(crds))
+		}
 	}
 
 	clients = append(clients, openapiclient.NewHardcodedBuiltins("1.32"))
 
-	if crds, err := data.Crds(); err == nil {
-		clients = append(clients, openapiclient.NewLocalSchemaFiles(crds))
-	}
-
 	return openapiclient.NewComposite(clients...)
+}
+
+// tryClusterOpenAPI attempts to get the OpenAPI client from the cluster's
+// discovery endpoint. Returns nil if the call panics (e.g., fake discovery
+// client in CLI test mode) or if the client is nil.
+func (p *PolicyProcessor) tryClusterOpenAPI() (client openapi.Client) {
+	defer func() {
+		if r := recover(); r != nil {
+			client = nil
+		}
+	}()
+	return p.Client.GetKubeClient().Discovery().OpenAPIV3()
+}
+
+func (p *PolicyProcessor) resolveResource(kind string) (string, error) {
+	gvk := schema.GroupVersionKind{Kind: kind}
+	guessed, _ := meta.UnsafeGuessKindToResource(gvk)
+	if guessed.Resource != "" {
+		return guessed.Resource, nil
+	}
+	// Fallback: scan CEL policy match constraints for CRDs whose plural
+	// cannot be derived from the kind name alone.
+	kindLower := strings.ToLower(kind)
+	for _, vp := range p.ValidatingPolicies {
+		mc := vp.GetSpec().MatchConstraints
+		if mc == nil {
+			continue
+		}
+		for _, rr := range mc.ResourceRules {
+			for _, res := range rr.Resources {
+				base, _, _ := strings.Cut(res, "/")
+				if strings.ToLower(base) == kindLower {
+					return base, nil
+				}
+			}
+		}
+	}
+	for _, mp := range p.MutatingPolicies {
+		mc := mp.GetSpec().MatchConstraints
+		if mc == nil {
+			continue
+		}
+		for _, rr := range mc.ResourceRules {
+			for _, res := range rr.Resources {
+				base, _, _ := strings.Cut(res, "/")
+				if strings.ToLower(base) == kindLower {
+					return base, nil
+				}
+			}
+		}
+	}
+	for _, gp := range p.GeneratingPolicies {
+		mc := gp.GetSpec().MatchConstraints
+		if mc == nil {
+			continue
+		}
+		for _, rr := range mc.ResourceRules {
+			for _, res := range rr.Resources {
+				base, _, _ := strings.Cut(res, "/")
+				if strings.ToLower(base) == kindLower {
+					return base, nil
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf("failed to infer resource name for Kind %q: no RESTMapper available and no matching policy resource rule found", kind)
+}
+
+// targetMatchPredicate returns a predicate that checks whether a target resource
+// matches a MutatingPolicy's targetMatchConstraints. This filters out policies
+// whose target constraints don't match the given target, mirroring the filtering
+// the background controller does via API list calls before calling Evaluate.
+// celTargets maps policy names to the set of target keys (namespace/name) discovered
+// by evaluating CEL expressions.
+func targetMatchPredicate(m matching.Matcher, attr admission.Attributes, celTargets map[string]map[string]bool) func(policiesv1beta1.MutatingPolicyLike) bool {
+	return func(mpol policiesv1beta1.MutatingPolicyLike) bool {
+		tc := mpol.GetTargetMatchConstraints()
+		if tc.Expression != "" {
+			// CEL expression target selection — check pre-computed targets
+			targets, ok := celTargets[mpol.GetName()]
+			if !ok {
+				return false
+			}
+			ns := attr.GetNamespace()
+			name := attr.GetName()
+			key := name
+			if ns != "" {
+				key = ns + "/" + name
+			}
+			return targets[key]
+		}
+		// Mirror background controller logic: use targetMatchConstraints if set,
+		// otherwise fall back to matchConstraints
+		constraints := mpol.GetMatchConstraints()
+		if len(tc.ResourceRules) != 0 {
+			constraints = tc.MatchResources
+		}
+		// Override operations to wildcard — operations are irrelevant for target matching
+		// (the background controller doesn't check operations either)
+		rules := make([]admissionregistrationv1.NamedRuleWithOperations, len(constraints.ResourceRules))
+		for i, r := range constraints.ResourceRules {
+			rules[i] = r
+			rules[i].Operations = []admissionregistrationv1.OperationType{admissionregistrationv1.OperationAll}
+		}
+		constraints.ResourceRules = rules
+		matches, err := m.Match(&matching.MatchCriteria{Constraints: &constraints}, attr, nil)
+		if err != nil {
+			return false
+		}
+		return matches
+	}
+}
+
+// discoverCELTargets evaluates CEL targetMatchConstraints expressions for mutateExisting
+// policies and returns a map of policy name → set of target keys (namespace/name).
+func discoverCELTargets(
+	provider mpolengine.Provider,
+	contextProvider libs.Context,
+	resource *unstructured.Unstructured,
+) (map[string]map[string]bool, error) {
+	result := make(map[string]map[string]bool)
+	pols := provider.Fetch(context.TODO(), true)
+	for _, pol := range pols {
+		tc := pol.Policy.GetTargetMatchConstraints()
+		if tc.Expression == "" {
+			continue
+		}
+
+		compiledVars := pol.CompiledPolicy.GetCompiledVariables()
+		data := map[string]any{
+			compiler.ObjectKey: resource.Object,
+		}
+		vars := lazy.NewMapValue(compiler.VariablesType)
+		data[compiler.VariablesKey] = vars
+		for name, variable := range compiledVars {
+			vars.Append(name, func(*lazy.MapValue) ref.Val {
+				out, _, err := variable.ContextEval(context.TODO(), data)
+				if out != nil {
+					return out
+				}
+				if err != nil {
+					return types.WrapErr(err)
+				}
+				return nil
+			})
+		}
+
+		policyNs := pol.Policy.GetNamespace()
+		env, err := mpol.BuildMpolTargetEvalEnv(contextProvider, policyNs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build CEL env for policy %s: %w", pol.Policy.GetName(), err)
+		}
+		ast, issues := env.Compile(tc.Expression)
+		if err := issues.Err(); err != nil {
+			return nil, fmt.Errorf("failed to compile CEL expression for policy %s: %w", pol.Policy.GetName(), err)
+		}
+		if !ast.OutputType().IsExactType(types.NewMapType(types.StringType, types.AnyType)) {
+			return nil, fmt.Errorf("output type of the target selector expression must be a map for policy %s", pol.Policy.GetName())
+		}
+		prog, err := env.Program(ast)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create CEL program for policy %s: %w", pol.Policy.GetName(), err)
+		}
+		out, _, err := prog.ContextEval(context.TODO(), data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to evaluate CEL expression for policy %s: %w", pol.Policy.GetName(), err)
+		}
+		unstructuredResources, err := celutils.ConvertToNative[map[string]interface{}](out)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert CEL result for policy %s: %w", pol.Policy.GetName(), err)
+		}
+
+		targetKeys := make(map[string]bool)
+		if items, ok := unstructuredResources["items"].([]interface{}); ok {
+			for _, item := range items {
+				m, ok := item.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				obj := unstructured.Unstructured{Object: m}
+				key := obj.GetName()
+				if ns := obj.GetNamespace(); ns != "" {
+					key = ns + "/" + key
+				}
+				targetKeys[key] = true
+			}
+		} else {
+			obj := unstructured.Unstructured{Object: unstructuredResources}
+			key := obj.GetName()
+			if ns := obj.GetNamespace(); ns != "" {
+				key = ns + "/" + key
+			}
+			targetKeys[key] = true
+		}
+		result[pol.Policy.GetName()] = targetKeys
+	}
+	return result, nil
+}
+
+func hasSelector(match *admissionregistrationv1.MatchResources) bool {
+	if match == nil {
+		return false
+	}
+	if match.NamespaceSelector != nil {
+		if len(match.NamespaceSelector.MatchLabels) > 0 || len(match.NamespaceSelector.MatchExpressions) > 0 {
+			return false
+		}
+	}
+	if match.ObjectSelector != nil {
+		if len(match.ObjectSelector.MatchLabels) > 0 || len(match.ObjectSelector.MatchExpressions) > 0 {
+			return false
+		}
+	}
+	if len(match.ExcludeResourceRules) != 0 {
+		return false
+	}
+	if len(match.ResourceRules) != 1 {
+		return false
+	}
+	rule := match.ResourceRules[0]
+	if len(rule.ResourceNames) > 0 {
+		return false
+	}
+	return true
+}
+
+func (p *PolicyProcessor) loadCrds() error {
+	return common.LoadCrdsFromPath(p.CrdPath)
+}
+
+func getAbsPath(path string) string {
+	if path[len(path)-1] == '/' {
+		path = path[:len(path)-1]
+	}
+	absPath, _ := filepath.Abs(path)
+	fileInfo, err := os.Stat(absPath)
+	if err == nil && !fileInfo.IsDir() {
+		absPath = filepath.Dir(absPath)
+	}
+	return absPath
 }

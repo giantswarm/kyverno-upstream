@@ -1,15 +1,14 @@
 global:
   crdWatcher: true
 
-metricsConfig:
-  metricsRefreshInterval: 1m
-
 features:
   policyExceptions:
     enabled: true
     namespace: "*"
   omitEvents:
     eventTypes: []
+  validatingAdmissionPolicyReports:
+    enabled: true
 
 admissionController:
   extraArgs:
@@ -44,6 +43,8 @@ backgroundController:
             - secrets
             - roles
             - rolebindings
+            - clusterroles
+            - clusterrolebindings
             - limitranges
             - namespaces
             - nodes

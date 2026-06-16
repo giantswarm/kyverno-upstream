@@ -34,16 +34,16 @@ limitations under the License.
 ## 📑 Table of Contents
 
 - [About Kyverno](#about-kyverno)
+- [Non-Goals](#non-goals)
 - [Documentation](#-documentation)
 - [Demos & Tutorials](#-demos--tutorials)
 - [Popular Use Cases](#-popular-use-cases)
 - [Explore the Policy Library](#-explore-the-policy-library)
 - [Getting Help](#-getting-help)
 - [Contributing](#-contributing)
-- [Software Bill of Materials](#software-bill-of-materials)
-- [Community Highlights](#-community-highlights)
-- [Contributors](#contributors)
-- [License](#license)
+- [Software Bill of Materials](#-software-bill-of-materials)
+- [Contributors](#-contributors)
+- [License](#-license)
 
 ## About Kyverno
 
@@ -56,6 +56,16 @@ Kyverno is a Kubernetes-native policy engine designed for platform engineering t
 <a href="https://opensourcesecurityindex.io/" target="_blank" rel="noopener">
   <img src="https://opensourcesecurityindex.io/badge.svg" alt="Open Source Security Index badge" width="282" height="56" />
 </a>
+
+## Non-Goals
+
+Kyverno is only able to impact the policies used by Kubernetes and is **not** designed to address Kubernetes security flaws that are inherent in its design. For example, it cannot protect against vulnerabilities in the Kubernetes API server (e.g. Billion Laughs YAML deserialization, or a faulty Admission Controller implementation) or underlying infrastructure, and Kyverno's policy enforcement may be bypassed if Kubernetes itself has a security flaw. Kyverno does not enforce security requirements that were not explicitly defined — it enforces only the policies that users define and must be actively maintained like any other security product.
+
+Kyverno does not replace, but works in conjunction with, Kubernetes RBAC: RBAC controls access while Kyverno enforces policy compliance. Cluster admins are expected to use RBAC to manage user and service account authorization, and then leverage Kyverno for additional checks that RBAC cannot perform.
+
+Kyverno also does not replace Kubernetes' built-in policy controls like `ValidatingAdmissionPolicies` and `MutatingAdmissionPolicies`, but complements these native controls with additional features such as comprehensive reporting, exception management, and periodic background scanning.
+
+Several capabilities that are out of scope for the core engine are addressed by companion projects in the Kyverno organization: end-to-end testing tooling ([Chainsaw](https://github.com/kyverno/chainsaw)), policy violation reporting and UI ([Policy Reporter](https://github.com/kyverno/policy-reporter)), policy evaluation for non-Kubernetes JSON payloads ([Kyverno JSON](https://github.com/kyverno/kyverno-json)), and authorization policy for service meshes ([Kyverno Envoy Plugin](https://github.com/kyverno/kyverno-envoy-plugin)). These are maintained as separate projects with their own release cycles.
 
 ## 📙 Documentation
 
@@ -118,6 +128,7 @@ We’re here to help:
 Thank you for your interest in contributing to Kyverno!
 
 - ✅ Read the [Contribution Guidelines](/CONTRIBUTING.md)
+- 🤖 Read The [AI_Usage_Policy](https://github.com/kyverno/community/blob/main/AI_USAGE_POLICY.md)
 - 🧵 Join [GitHub Discussions](https://github.com/kyverno/kyverno/discussions)
 - 📖 Read the [Development Guide](/DEVELOPMENT.md)
 - 🏁 Check [Good First Issues](https://github.com/kyverno/kyverno/labels/good%20first%20issue) and request with `/assign`
@@ -142,7 +153,7 @@ _Made with [contributors-img](https://contrib.rocks)_
 
 ## 📄 License
 
-Copyright 2025, the Kyverno project. All rights reserved.  
+Copyright 2026, the Kyverno project. All rights reserved.  
 Kyverno is licensed under the [Apache License 2.0](LICENSE).
 
 Kyverno is a [Cloud Native Computing Foundation (CNCF) Incubating project](https://www.cncf.io/projects/) and was contributed by [Nirmata](https://nirmata.com/?utm_source=github&utm_medium=repository).

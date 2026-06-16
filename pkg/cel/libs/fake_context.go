@@ -11,6 +11,9 @@ import (
 
 type FakeContextProvider struct {
 	resources          map[string]map[string]map[string]*unstructured.Unstructured
+	images             map[string]map[string]any
+	globalReferences   map[string]any
+	httpMocks          map[string]interface{}
 	generatedResources []*unstructured.Unstructured
 	policyName         string
 	triggerName        string
@@ -24,8 +27,14 @@ type FakeContextProvider struct {
 
 func NewFakeContextProvider() *FakeContextProvider {
 	return &FakeContextProvider{
-		resources: map[string]map[string]map[string]*unstructured.Unstructured{},
+		resources:        map[string]map[string]map[string]*unstructured.Unstructured{},
+		images:           map[string]map[string]any{},
+		globalReferences: map[string]any{},
 	}
+}
+
+func (cp *FakeContextProvider) AddImageData(image string, data map[string]any) {
+	cp.images[image] = data
 }
 
 func (cp *FakeContextProvider) AddResource(gvr schema.GroupVersionResource, obj runtime.Object) error {
@@ -48,12 +57,49 @@ func (cp *FakeContextProvider) AddResource(gvr schema.GroupVersionResource, obj 
 	return nil
 }
 
-func (cp *FakeContextProvider) GetGlobalReference(string, string) (any, error) {
-	panic("not implemented")
+func (cp *FakeContextProvider) AddGlobalReference(name string, data any) {
+	if cp.globalReferences == nil {
+		cp.globalReferences = map[string]any{}
+	}
+	cp.globalReferences[name] = data
 }
 
-func (cp *FakeContextProvider) GetImageData(string) (map[string]any, error) {
-	panic("not implemented")
+func (cp *FakeContextProvider) SetHTTPMocks(mocks map[string]interface{}) {
+	cp.httpMocks = mocks
+}
+
+func (cp *FakeContextProvider) GetHTTPMocks() map[string]interface{} {
+	return cp.httpMocks
+}
+
+func (cp *FakeContextProvider) GetGlobalReference(name, projection string) (any, error) {
+	data, ok := cp.globalReferences[name]
+	if !ok {
+		return nil, nil
+	}
+	// When a projection is requested, look it up inside the stored data map.
+	// This mirrors the real contextProvider.GetGlobalReference which calls
+	// storeEntry.Get(projection) and returns only the projection value.
+	if projection != "" {
+		if m, ok := data.(map[string]interface{}); ok {
+			if v, found := m[projection]; found {
+				return v, nil
+			}
+			return nil, fmt.Errorf("projection %q not found in global context entry %q", projection, name)
+		}
+		return nil, fmt.Errorf("projection %q not found in global context entry %q: stored value is not an object", projection, name)
+	}
+	return data, nil
+}
+
+func (cp *FakeContextProvider) GetImageData(image string) (map[string]any, error) {
+	if cp.images == nil {
+		return nil, fmt.Errorf("image data not found in the context")
+	}
+	if _, found := cp.images[image]; !found {
+		return nil, fmt.Errorf("image data for %s not found in the context", image)
+	}
+	return cp.images[image], nil
 }
 
 func (cp *FakeContextProvider) ToGVR(apiVersion, kind string) (*schema.GroupVersionResource, error) {

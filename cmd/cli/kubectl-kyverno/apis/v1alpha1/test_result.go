@@ -65,6 +65,9 @@ type TestResultBase struct {
 	// CloneSourceResource takes the resource configuration file in yaml format
 	// from the user which is meant to be cloned by the generate rule.
 	CloneSourceResource string `json:"cloneSourceResource,omitempty"`
+
+	// FailOnMissingResources indicates if the test should fail if the patched/generated resources are missing.
+	FailOnMissingResources bool `json:"failOnMissingResources,omitempty"`
 }
 
 // TestResultData declares a test result data
@@ -74,6 +77,10 @@ type TestResultData struct {
 
 	// Resources gives us the list of resources on which the policy is going to be applied.
 	ResourceSpecs []TestResourceSpec `json:"resourceSpecs,omitempty"`
+
+	// GeneratedResources takes a list of resource configuration files in yaml format from
+	// the user to compare them against the Kyverno generated resource configurations.
+	GeneratedResources []string `json:"generatedResources,omitempty"`
 }
 
 // TestResult declares a test result

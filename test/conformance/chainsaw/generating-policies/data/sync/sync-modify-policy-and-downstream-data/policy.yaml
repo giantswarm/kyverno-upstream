@@ -1,4 +1,4 @@
-apiVersion: policies.kyverno.io/v1alpha1
+apiVersion: policies.kyverno.io/v1beta1
 kind: GeneratingPolicy
 metadata:
   name: sync-modify-policy-and-downstream-data
@@ -32,4 +32,4 @@ spec:
           }
         ]
   generate:
-    - expression: generator.Apply(variables.nsName, variables.configmap)
+    - expression: generator.apply(variables.nsName, variables.configmap)

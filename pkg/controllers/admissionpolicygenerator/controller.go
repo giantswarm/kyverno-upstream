@@ -11,11 +11,9 @@ import (
 	"github.com/kyverno/kyverno/pkg/client/clientset/versioned"
 	kyvernov1informers "github.com/kyverno/kyverno/pkg/client/informers/externalversions/kyverno/v1"
 	kyvernov2informers "github.com/kyverno/kyverno/pkg/client/informers/externalversions/kyverno/v2"
-	policiesv1alpha1informers "github.com/kyverno/kyverno/pkg/client/informers/externalversions/policies.kyverno.io/v1alpha1"
 	policiesv1beta1informers "github.com/kyverno/kyverno/pkg/client/informers/externalversions/policies.kyverno.io/v1beta1"
 	kyvernov1listers "github.com/kyverno/kyverno/pkg/client/listers/kyverno/v1"
 	kyvernov2listers "github.com/kyverno/kyverno/pkg/client/listers/kyverno/v2"
-	policiesv1alpha1listers "github.com/kyverno/kyverno/pkg/client/listers/policies.kyverno.io/v1alpha1"
 	policiesv1beta1listers "github.com/kyverno/kyverno/pkg/client/listers/policies.kyverno.io/v1beta1"
 	"github.com/kyverno/kyverno/pkg/clients/dclient"
 	"github.com/kyverno/kyverno/pkg/controllers"
@@ -28,9 +26,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	admissionregistrationv1informers "k8s.io/client-go/informers/admissionregistration/v1"
 	admissionregistrationv1alpha1informers "k8s.io/client-go/informers/admissionregistration/v1alpha1"
+	admissionregistrationv1beta1informers "k8s.io/client-go/informers/admissionregistration/v1beta1"
 	"k8s.io/client-go/kubernetes"
 	admissionregistrationv1listers "k8s.io/client-go/listers/admissionregistration/v1"
 	admissionregistrationv1alpha1listers "k8s.io/client-go/listers/admissionregistration/v1alpha1"
+	admissionregistrationv1beta1listers "k8s.io/client-go/listers/admissionregistration/v1beta1"
 	"k8s.io/client-go/util/workqueue"
 )
 
@@ -52,16 +52,19 @@ type controller struct {
 	discoveryClient dclient.IDiscovery
 
 	// listers
-	cpolLister       kyvernov1listers.ClusterPolicyLister
-	vpolLister       policiesv1beta1listers.ValidatingPolicyLister
-	nvpolLister      policiesv1beta1listers.NamespacedValidatingPolicyLister
-	mpolLister       policiesv1alpha1listers.MutatingPolicyLister
-	polexLister      kyvernov2listers.PolicyExceptionLister
-	celpolexLister   policiesv1alpha1listers.PolicyExceptionLister
-	vapLister        admissionregistrationv1listers.ValidatingAdmissionPolicyLister
-	vapbindingLister admissionregistrationv1listers.ValidatingAdmissionPolicyBindingLister
-	mapLister        admissionregistrationv1alpha1listers.MutatingAdmissionPolicyLister
-	mapbindingLister admissionregistrationv1alpha1listers.MutatingAdmissionPolicyBindingLister
+	cpolLister            kyvernov1listers.ClusterPolicyLister
+	vpolLister            policiesv1beta1listers.ValidatingPolicyLister
+	nvpolLister           policiesv1beta1listers.NamespacedValidatingPolicyLister
+	mpolLister            policiesv1beta1listers.MutatingPolicyLister
+	nmpolLister           policiesv1beta1listers.NamespacedMutatingPolicyLister
+	polexLister           kyvernov2listers.PolicyExceptionLister
+	celpolexLister        policiesv1beta1listers.PolicyExceptionLister
+	vapLister             admissionregistrationv1listers.ValidatingAdmissionPolicyLister
+	vapbindingLister      admissionregistrationv1listers.ValidatingAdmissionPolicyBindingLister
+	mapBetaLister         admissionregistrationv1beta1listers.MutatingAdmissionPolicyLister
+	mapbindingBetaLister  admissionregistrationv1beta1listers.MutatingAdmissionPolicyBindingLister
+	mapAlphaLister        admissionregistrationv1alpha1listers.MutatingAdmissionPolicyLister
+	mapbindingAlphaLister admissionregistrationv1alpha1listers.MutatingAdmissionPolicyBindingLister
 
 	// queue
 	queue workqueue.TypedRateLimitingInterface[any]
@@ -77,13 +80,16 @@ func NewController(
 	cpolInformer kyvernov1informers.ClusterPolicyInformer,
 	vpolInformer policiesv1beta1informers.ValidatingPolicyInformer,
 	nvpolInformer policiesv1beta1informers.NamespacedValidatingPolicyInformer,
-	mpolInformer policiesv1alpha1informers.MutatingPolicyInformer,
+	mpolInformer policiesv1beta1informers.MutatingPolicyInformer,
+	nmpolInformer policiesv1beta1informers.NamespacedMutatingPolicyInformer,
 	polexInformer kyvernov2informers.PolicyExceptionInformer,
-	celpolexInformer policiesv1alpha1informers.PolicyExceptionInformer,
+	celpolexInformer policiesv1beta1informers.PolicyExceptionInformer,
 	vapInformer admissionregistrationv1informers.ValidatingAdmissionPolicyInformer,
 	vapbindingInformer admissionregistrationv1informers.ValidatingAdmissionPolicyBindingInformer,
-	mapInformer admissionregistrationv1alpha1informers.MutatingAdmissionPolicyInformer,
-	mapbindingInformer admissionregistrationv1alpha1informers.MutatingAdmissionPolicyBindingInformer,
+	mapBetaInformer admissionregistrationv1beta1informers.MutatingAdmissionPolicyInformer,
+	mapbindingBetaInformer admissionregistrationv1beta1informers.MutatingAdmissionPolicyBindingInformer,
+	mapAlphaInformer admissionregistrationv1alpha1informers.MutatingAdmissionPolicyInformer,
+	mapbindingAlphaInformer admissionregistrationv1alpha1informers.MutatingAdmissionPolicyBindingInformer,
 	eventGen event.Interface,
 	checker checker.AuthChecker,
 ) controllers.Controller {
@@ -99,6 +105,7 @@ func NewController(
 		vpolLister:      vpolInformer.Lister(),
 		nvpolLister:     nvpolInformer.Lister(),
 		mpolLister:      mpolInformer.Lister(),
+		nmpolLister:     nmpolInformer.Lister(),
 		polexLister:     polexInformer.Lister(),
 		celpolexLister:  celpolexInformer.Lister(),
 		queue:           queue,
@@ -118,6 +125,11 @@ func NewController(
 
 	// Set up an event handler for when mutating policies change
 	if _, err := controllerutils.AddEventHandlersT(mpolInformer.Informer(), c.addMP, c.updateMP, c.deleteMP); err != nil {
+		logger.Error(err, "failed to register event handlers")
+	}
+
+	// Set up an event handler for when namespaced mutating policies change
+	if _, err := controllerutils.AddEventHandlersT(nmpolInformer.Informer(), c.addMP, c.updateMP, c.deleteMP); err != nil {
 		logger.Error(err, "failed to register event handlers")
 	}
 
@@ -147,18 +159,34 @@ func NewController(
 		}
 	}
 
-	// Set up an event handler for when MutatingAdmissionPolicies change
-	if mapInformer != nil {
-		c.mapLister = mapInformer.Lister()
-		if _, err := controllerutils.AddEventHandlersT(mapInformer.Informer(), c.addMAP, c.updateMAP, c.deleteMAP); err != nil {
+	// Set up an event handler for when MutatingAdmissionPolicies change (v1beta1)
+	if mapBetaInformer != nil {
+		c.mapBetaLister = mapBetaInformer.Lister()
+		if _, err := controllerutils.AddEventHandlersT(mapBetaInformer.Informer(), c.addMAPBeta, c.updateMAPBeta, c.deleteMAPBeta); err != nil {
 			logger.Error(err, "failed to register event handlers")
 		}
 	}
 
-	// Set up an event handler for when MutatingAdmissionPolicyBindings change
-	if mapbindingInformer != nil {
-		c.mapbindingLister = mapbindingInformer.Lister()
-		if _, err := controllerutils.AddEventHandlersT(mapbindingInformer.Informer(), c.addMAPbinding, c.updateMAPbinding, c.deleteMAPbinding); err != nil {
+	// Set up an event handler for when MutatingAdmissionPolicyBindings change (v1beta1)
+	if mapbindingBetaInformer != nil {
+		c.mapbindingBetaLister = mapbindingBetaInformer.Lister()
+		if _, err := controllerutils.AddEventHandlersT(mapbindingBetaInformer.Informer(), c.addMAPbindingBeta, c.updateMAPbindingBeta, c.deleteMAPbindingBeta); err != nil {
+			logger.Error(err, "failed to register event handlers")
+		}
+	}
+
+	// Set up an event handler for when MutatingAdmissionPolicies change (v1alpha1)
+	if mapAlphaInformer != nil {
+		c.mapAlphaLister = mapAlphaInformer.Lister()
+		if _, err := controllerutils.AddEventHandlersT(mapAlphaInformer.Informer(), c.addMAPAlpha, c.updateMAPAlpha, c.deleteMAPAlpha); err != nil {
+			logger.Error(err, "failed to register event handlers")
+		}
+	}
+
+	// Set up an event handler for when MutatingAdmissionPolicyBindings change (v1alpha1)
+	if mapbindingAlphaInformer != nil {
+		c.mapbindingAlphaLister = mapbindingAlphaInformer.Lister()
+		if _, err := controllerutils.AddEventHandlersT(mapbindingAlphaInformer.Informer(), c.addMAPbindingAlpha, c.updateMAPbindingAlpha, c.deleteMAPbindingAlpha); err != nil {
 			logger.Error(err, "failed to register event handlers")
 		}
 	}
@@ -215,10 +243,6 @@ func (c *controller) reconcile(ctx context.Context, logger logr.Logger, key, nam
 			return err
 		}
 	} else if polType == "MutatingPolicy" {
-		generateMutatingAdmissionPolicy := toggle.FromContext(context.TODO()).GenerateMutatingAdmissionPolicy()
-		if !generateMutatingAdmissionPolicy {
-			return nil
-		}
 		mpol, err := c.getMutatingPolicy(name)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
@@ -226,6 +250,13 @@ func (c *controller) reconcile(ctx context.Context, logger logr.Logger, key, nam
 			}
 			logger.Error(err, "unable to get the policy from policy informer")
 			return err
+		}
+		generateMutatingAdmissionPolicy := toggle.FromContext(context.TODO()).GenerateMutatingAdmissionPolicy()
+		if !generateMutatingAdmissionPolicy {
+			if !mpol.Spec.GenerateMutatingAdmissionPolicyEnabled() {
+				return nil
+			}
+			logger.Info("generating MutatingAdmissionPolicy explicitly enabled in policy", "policy", mpol.GetName())
 		}
 		err = c.handleMAPGeneration(ctx, mpol)
 		if err != nil {
@@ -244,7 +275,8 @@ func (c *controller) updatePolicyStatus(ctx context.Context, policy engineapi.Ge
 
 		new, err := c.kyvernoClient.KyvernoV1().ClusterPolicies().UpdateStatus(ctx, latest, metav1.UpdateOptions{})
 		if err != nil {
-			logging.Error(err, "failed to update cluster policy status", cpol.GetName(), "status", new.Status)
+			logging.Error(err, "failed to update cluster policy status", "name", cpol.GetName(), "status", latest.Status)
+			return
 		}
 		logging.V(3).Info("updated cluster policy status", "name", cpol.GetName(), "status", new.Status)
 	} else if vpol := policy.AsValidatingPolicy(); vpol != nil {
@@ -254,7 +286,8 @@ func (c *controller) updatePolicyStatus(ctx context.Context, policy engineapi.Ge
 
 		new, err := c.kyvernoClient.PoliciesV1beta1().ValidatingPolicies().UpdateStatus(ctx, latest, metav1.UpdateOptions{})
 		if err != nil {
-			logging.Error(err, "failed to update validating policy status", vpol.GetName(), "status", new.Status)
+			logging.Error(err, "failed to update validating policy status", "name", vpol.GetName(), "status", latest.Status)
+			return
 		}
 
 		logging.V(3).Info("updated validating policy status", "name", vpol.GetName(), "status", new.Status)
@@ -263,9 +296,10 @@ func (c *controller) updatePolicyStatus(ctx context.Context, policy engineapi.Ge
 		latest.Status.Generated = generated
 		latest.Status.GetConditionStatus().Message = msg
 
-		new, err := c.kyvernoClient.PoliciesV1alpha1().MutatingPolicies().UpdateStatus(ctx, latest, metav1.UpdateOptions{})
+		new, err := c.kyvernoClient.PoliciesV1beta1().MutatingPolicies().UpdateStatus(ctx, latest, metav1.UpdateOptions{})
 		if err != nil {
-			logging.Error(err, "failed to update mutating policy status", mpol.GetName(), "status", new.Status)
+			logging.Error(err, "failed to update mutating policy status", "name", mpol.GetName(), "status", latest.Status)
+			return
 		}
 
 		logging.V(3).Info("updated mutating policy status", "name", mpol.GetName(), "status", new.Status)

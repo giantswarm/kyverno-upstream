@@ -1,7 +1,7 @@
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
-  name: disallow-latest-tag
+  name: ($test.metadata.name)
 status:
   autogen:
     rules:
@@ -9,7 +9,7 @@ status:
         any:
         - resources:
             kinds:
-            - Deployment
+            - apps/v1/Deployment
       name: autogen-require-image-tag
       validate:
         failureAction: Audit
@@ -24,7 +24,7 @@ status:
         any:
         - resources:
             kinds:
-            - CronJob
+            - batch/v1/CronJob
       name: autogen-cronjob-require-image-tag
       validate:
         failureAction: Audit
@@ -41,7 +41,7 @@ status:
         any:
         - resources:
             kinds:
-            - Deployment
+            - apps/v1/Deployment
       name: autogen-validate-image-tag
       validate:
         failureAction: Audit
@@ -56,7 +56,7 @@ status:
         any:
         - resources:
             kinds:
-            - CronJob
+            - batch/v1/CronJob
       name: autogen-cronjob-validate-image-tag
       validate:
         failureAction: Audit

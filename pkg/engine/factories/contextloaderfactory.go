@@ -18,10 +18,15 @@ import (
 type ContextLoaderFactoryOptions func(*contextLoader)
 
 func DefaultContextLoaderFactory(cmResolver engineapi.ConfigmapResolver, opts ...ContextLoaderFactoryOptions) engineapi.ContextLoaderFactory {
-	return func(_ kyvernov1.PolicyInterface, _ kyvernov1.Rule) engineapi.ContextLoader {
+	return func(policy kyvernov1.PolicyInterface, _ kyvernov1.Rule) engineapi.ContextLoader {
+		policyNamespace := ""
+		if policy != nil && policy.IsNamespaced() {
+			policyNamespace = policy.GetNamespace()
+		}
 		cl := &contextLoader{
-			logger:     logging.WithName("DefaultContextLoaderFactory"),
-			cmResolver: cmResolver,
+			logger:          logging.WithName("DefaultContextLoaderFactory"),
+			cmResolver:      cmResolver,
+			policyNamespace: policyNamespace,
 		}
 		for _, o := range opts {
 			o(cl)
@@ -49,11 +54,12 @@ func WithGlobalContextStore(gctxStore loaders.Store) ContextLoaderFactoryOptions
 }
 
 type contextLoader struct {
-	logger        logr.Logger
-	cmResolver    engineapi.ConfigmapResolver
-	initializers  []engineapi.Initializer
-	apiCallConfig apicall.APICallConfiguration
-	gctxStore     loaders.Store
+	logger          logr.Logger
+	cmResolver      engineapi.ConfigmapResolver
+	initializers    []engineapi.Initializer
+	apiCallConfig   apicall.APICallConfiguration
+	gctxStore       loaders.Store
+	policyNamespace string
 }
 
 func (l *contextLoader) Load(
@@ -64,11 +70,29 @@ func (l *contextLoader) Load(
 	contextEntries []kyvernov1.ContextEntry,
 	jsonContext enginecontext.Interface,
 ) error {
+	if err := l.runInitializers(jsonContext); err != nil {
+		return err
+	}
+	return l.loadContextEntries(ctx, jp, client, rclientFactory, contextEntries, jsonContext)
+}
+
+func (l *contextLoader) runInitializers(jsonContext enginecontext.Interface) error {
 	for _, init := range l.initializers {
 		if err := init(jsonContext); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+func (l *contextLoader) loadContextEntries(
+	ctx context.Context,
+	jp jmespath.Interface,
+	client engineapi.RawClient,
+	rclientFactory engineapi.RegistryClientFactory,
+	contextEntries []kyvernov1.ContextEntry,
+	jsonContext enginecontext.Interface,
+) error {
 	for _, entry := range contextEntries {
 		loader, err := l.newLoader(ctx, jp, client, rclientFactory, entry, jsonContext, l.gctxStore)
 		if err != nil {
@@ -89,6 +113,32 @@ func (l *contextLoader) Load(
 	return nil
 }
 
+// RunContextLoaderInitializers runs WithInitializer callbacks registered on the context loader.
+func RunContextLoaderInitializers(l engineapi.ContextLoader, jsonContext enginecontext.Interface) error {
+	cl, ok := l.(*contextLoader)
+	if !ok {
+		return fmt.Errorf("unexpected context loader type %T; expected *contextLoader from DefaultContextLoaderFactory", l)
+	}
+	return cl.runInitializers(jsonContext)
+}
+
+// LoadContextLoaderEntriesWithoutInitializers loads context entries only; pair with RunContextLoaderInitializers when splitting the load flow.
+func LoadContextLoaderEntriesWithoutInitializers(
+	l engineapi.ContextLoader,
+	ctx context.Context,
+	jp jmespath.Interface,
+	client engineapi.RawClient,
+	rclientFactory engineapi.RegistryClientFactory,
+	contextEntries []kyvernov1.ContextEntry,
+	jsonContext enginecontext.Interface,
+) error {
+	cl, ok := l.(*contextLoader)
+	if !ok {
+		return fmt.Errorf("unexpected context loader type %T; expected *contextLoader from DefaultContextLoaderFactory", l)
+	}
+	return cl.loadContextEntries(ctx, jp, client, rclientFactory, contextEntries, jsonContext)
+}
+
 func (l *contextLoader) newLoader(
 	ctx context.Context,
 	jp jmespath.Interface,
@@ -100,7 +150,7 @@ func (l *contextLoader) newLoader(
 ) (enginecontext.DeferredLoader, error) {
 	if entry.ConfigMap != nil {
 		if l.cmResolver != nil {
-			ldr := loaders.NewConfigMapLoader(ctx, l.logger, entry, l.cmResolver, jsonContext)
+			ldr := loaders.NewConfigMapLoader(ctx, l.logger, entry, l.cmResolver, jsonContext, l.policyNamespace)
 			return enginecontext.NewDeferredLoader(entry.Name, ldr, l.logger)
 		} else {
 			l.logger.V(3).Info("disabled loading of ConfigMap context entry", "name", entry.Name)
@@ -108,7 +158,7 @@ func (l *contextLoader) newLoader(
 		}
 	} else if entry.APICall != nil {
 		if client != nil {
-			ldr := loaders.NewAPILoader(ctx, l.logger, entry, jsonContext, jp, client, l.apiCallConfig)
+			ldr := loaders.NewAPILoader(ctx, l.logger, entry, jsonContext, jp, client, l.apiCallConfig, l.policyNamespace)
 			return enginecontext.NewDeferredLoader(entry.Name, ldr, l.logger)
 		} else {
 			l.logger.V(3).Info("disabled loading of APICall context entry", "name", entry.Name)

@@ -8,15 +8,16 @@ import (
 	"strings"
 	"time"
 
+	policiesv1beta1 "github.com/kyverno/api/api/policies.kyverno.io/v1beta1"
 	"github.com/kyverno/kyverno/api/kyverno"
-	policiesv1alpha1 "github.com/kyverno/kyverno/api/policies.kyverno.io/v1alpha1"
+	"github.com/kyverno/kyverno/pkg/admissionpolicy"
 	"github.com/kyverno/kyverno/pkg/cel/engine"
 	"github.com/kyverno/kyverno/pkg/cel/libs"
 	"github.com/kyverno/kyverno/pkg/cel/matching"
 	engineapi "github.com/kyverno/kyverno/pkg/engine/api"
-	eval "github.com/kyverno/kyverno/pkg/imageverification/evaluator"
-	"github.com/kyverno/kyverno/pkg/imageverification/imagedataloader"
+	eval "github.com/kyverno/kyverno/pkg/image/verification/evaluator"
 	admissionutils "github.com/kyverno/kyverno/pkg/utils/admission"
+	"github.com/kyverno/sdk/extensions/imagedataloader"
 	"golang.org/x/exp/maps"
 	"gomodules.xyz/jsonpatch/v2"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -32,7 +33,7 @@ import (
 type (
 	EngineRequest  = engine.EngineRequest
 	EngineResponse = engine.EngineResponse
-	Predicate      = func(policiesv1alpha1.ImageValidatingPolicy) bool
+	Predicate      = func(policiesv1beta1.ImageValidatingPolicyLike) bool
 )
 
 type Engine interface {
@@ -99,8 +100,7 @@ func (e *engineImpl) HandleValidating(ctx context.Context, request EngineRequest
 		admission.Operation(request.Request.Operation),
 		nil,
 		dryRun,
-		// TODO
-		nil,
+		admissionpolicy.NewUser(request.Request.UserInfo),
 	)
 	// resolve namespace
 	var namespace runtime.Object
@@ -111,7 +111,7 @@ func (e *engineImpl) HandleValidating(ctx context.Context, request EngineRequest
 	var relevant []Policy
 	if predicate != nil {
 		for _, policy := range policies {
-			if !predicate(*policy.Policy) {
+			if !predicate(policy.Policy) {
 				continue
 			}
 			relevant = append(relevant, policy)
@@ -160,8 +160,7 @@ func (e *engineImpl) HandleMutating(ctx context.Context, request EngineRequest, 
 		admission.Operation(request.Request.Operation),
 		nil,
 		dryRun,
-		// TODO
-		nil,
+		admissionpolicy.NewUser(request.Request.UserInfo),
 	)
 	// resolve namespace
 	var namespace runtime.Object
@@ -172,7 +171,7 @@ func (e *engineImpl) HandleMutating(ctx context.Context, request EngineRequest, 
 	var relevant []Policy
 	if predicate != nil {
 		for _, policy := range policies {
-			if !predicate(*policy.Policy) {
+			if !predicate(policy.Policy) {
 				continue
 			}
 			relevant = append(relevant, policy)
@@ -198,7 +197,7 @@ func (e *engineImpl) matchPolicy(policy Policy, attr admission.Attributes, names
 		return matches, nil
 	}
 	// match against main policy constraints
-	matches, err := match(policy.Policy.Spec.MatchConstraints)
+	matches, err := match(policy.Policy.GetSpec().MatchConstraints)
 	if err != nil {
 		return false, err
 	}
@@ -231,6 +230,10 @@ func (e *engineImpl) handleMutation(
 				results[pol.Policy.GetName()] = response
 			} else if matches {
 				filteredPolicies = append(filteredPolicies, pol)
+			} else {
+				if !matches {
+					results[pol.Policy.GetName()] = response
+				}
 			}
 		}
 	}
@@ -269,9 +272,9 @@ func (e *engineImpl) handleMutation(
 				} else {
 					ruleName := ivpol.Policy.GetName()
 					if result.Error != nil {
-						response.Result = *engineapi.RuleError(ruleName, engineapi.ImageVerify, "error", err, nil)
+						response.Result = *engineapi.RuleError(ruleName, engineapi.ImageVerify, "error", result.Error, nil)
 					} else if result.Result {
-						response.Result = *engineapi.RulePass(ruleName, engineapi.ImageVerify, "success", nil)
+						response.Result = *engineapi.RulePass(ruleName, engineapi.ImageVerify, "success", result.AuditAnnotations)
 					} else {
 						response.Result = *engineapi.RuleFail(ruleName, engineapi.ImageVerify, result.Message, result.AuditAnnotations)
 					}
